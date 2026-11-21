@@ -1,0 +1,18 @@
+[project]
+name = "agentgrid"
+version = "0.1.0"
+description = "Signed identity, discovery and handoff receipts for AI agents"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+# Runtime dependencies only. Vercel reads this file to detect FastAPI and to
+# install packages at build time. Keep it lean (no tests/servers/lockfiles).
+dependencies = [
+    "fastapi>=0.115,<1",
+    "sqlalchemy[asyncio]>=2.0.28,<3",
+    "asyncpg>=0.29,<1",
+    "cryptography>=42,<51",
+    "python-dotenv>=1,<2",
+]
+
+[tool.vercel]
+entrypoint = "main:app"
