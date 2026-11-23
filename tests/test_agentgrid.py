@@ -19,6 +19,8 @@ os.environ["AGENTGRID_DATABASE_URL"] = (
 os.environ["AGENTGRID_SIGNING_KEY_B64"] = base64.urlsafe_b64encode(bytes(range(32))).decode("ascii").rstrip("=")
 os.environ["AGENTGRID_ADMIN_KEY"] = "test-admin-key"
 os.environ["AGENTGRID_ADMIN_MFA_SECRET"] = "JBSWY3DPEHPK3PXP"
+os.environ["AGENTGRID_OPS_LITE_KEY"] = "test-read-key"
+os.environ["AGENTGRID_OPS_LITE_CATCH"] = "test-catch-phrase"
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -143,6 +145,43 @@ def test_public_search_discovery_endpoints(api):
     ops = api.get("/ops")
     assert "noindex" in ops.text
     assert ops.headers["x-robots-tag"] == "noindex, nofollow"
+
+
+def test_ops_lite_single_step_snapshot(api):
+    login = api.get("/ops-lite")
+    assert login.status_code == 200
+    assert "Read key" in login.text
+    assert "Catch phrase" in login.text
+
+    bad = api.post(
+        "/v1/ops-lite/session",
+        data={"key": "wrong", "catch_phrase": "wrong"},
+        follow_redirects=False,
+    )
+    assert bad.status_code == 401
+    assert "Invalid read key or catch phrase" in bad.text
+
+    good = api.post(
+        "/v1/ops-lite/session",
+        data={"key": "test-read-key", "catch_phrase": "test-catch-phrase"},
+        follow_redirects=False,
+    )
+    assert good.status_code == 303
+    assert main.OPS_LITE_COOKIE in good.cookies
+
+    dashboard = api.get("/ops-lite")
+    assert dashboard.status_code == 200
+    assert "Public users" in dashboard.text
+    assert "Recent clients" in dashboard.text
+    assert "Sign out" in dashboard.text
+
+    stats = api.get("/v1/admin/stats")
+    assert stats.status_code == 200
+    assert "public_users" in stats.json()
+
+    logout = api.post("/v1/ops-lite/logout", follow_redirects=False)
+    assert logout.status_code == 303
+    assert api.get("/ops-lite").text.count("Read key") >= 1
 
 
 def test_open_registration_and_api_key_auth(api):
@@ -597,6 +636,7 @@ def test_legacy_account_upgrade_verifies_email_and_rotates_key(api):
     legacy = _register(api, client_id=legacy_id, email="old-legacy@example.test")
     old_key = legacy["api_key"]
 
+    # Simulate a legacy row: verified, but no email on file and no pending code.
     with sqlite3.connect(TEST_DB_PATH) as conn:
         conn.execute(
             "UPDATE clients SET email = NULL, email_verified = 1, "
@@ -623,6 +663,7 @@ def test_legacy_account_upgrade_verifies_email_and_rotates_key(api):
     assert "api_key" not in data
     code = data["verification_code"]
 
+    # The old key is now intentionally unusable until the code is confirmed.
     assert api.get("/v1/clients/me", headers=_headers(old_key)).status_code == 401
 
     verified = api.post(

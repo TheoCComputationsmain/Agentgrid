@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from welcome_email import send_verification_email, send_welcome_email
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import Boolean, Column, Integer, String, Text, func, text, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -80,6 +80,11 @@ Base = declarative_base()
 
 ADMIN_KEY = os.environ.get("AGENTGRID_ADMIN_KEY", "")
 ADMIN_MFA_SECRET = os.environ.get("AGENTGRID_ADMIN_MFA_SECRET", "")
+OPS_LITE_KEY = os.environ.get("AGENTGRID_OPS_LITE_KEY", "")
+OPS_LITE_CATCH = os.environ.get("AGENTGRID_OPS_LITE_CATCH", "")
+OPS_LITE_FRAME_ANCESTORS = (
+    os.environ.get("AGENTGRID_OPS_LITE_FRAME_ANCESTORS", "'self'").strip() or "'self'"
+)
 
 TIER_LIMITS = {
     "free": {"agents": 5, "handoffs": 100},
@@ -690,14 +695,25 @@ app.add_middleware(
 )
 
 
-def _with_security_headers(response):
+def _with_security_headers(response, path: str = ""):
     response.headers["X-Content-Type-Options"] = "nosniff"
-    response.headers["X-Frame-Options"] = "DENY"
     response.headers["Referrer-Policy"] = "no-referrer"
-    response.headers["Content-Security-Policy"] = (
-        "default-src 'self'; style-src 'unsafe-inline'; script-src 'none'; "
-        "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
-    )
+    if path == "/ops-lite" or path.startswith("/ops-lite/"):
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; style-src 'unsafe-inline'; script-src 'none'; "
+            f"connect-src 'self'; form-action 'self'; "
+            f"frame-ancestors {OPS_LITE_FRAME_ANCESTORS}; base-uri 'none'"
+        )
+        if OPS_LITE_FRAME_ANCESTORS.strip() == "'self'":
+            response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        else:
+            response.headers.pop("X-Frame-Options", None)
+    else:
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; style-src 'unsafe-inline'; script-src 'none'; "
+            "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'"
+        )
     return response
 
 
@@ -712,7 +728,8 @@ async def security_middleware(request: Request, call_next):
             try:
                 if int(length_header) > MAX_BODY_BYTES:
                     return _with_security_headers(
-                        JSONResponse(status_code=413, content={"detail": "Request body too large."})
+                        JSONResponse(status_code=413, content={"detail": "Request body too large."}),
+                        path,
                     )
             except ValueError:
                 pass
@@ -724,11 +741,12 @@ async def security_middleware(request: Request, call_next):
             bucket_key = hashlib.sha256(identity.encode("utf-8")).hexdigest()
             if not await _consume_rate_limit(bucket_key):
                 return _with_security_headers(
-                    JSONResponse(status_code=429, content={"detail": "Too many requests."})
+                    JSONResponse(status_code=429, content={"detail": "Too many requests."}),
+                    path,
                 )
 
     response = await call_next(request)
-    return _with_security_headers(response)
+    return _with_security_headers(response, path)
 
 
 class BodyLimitMiddleware:
@@ -837,6 +855,8 @@ async def verify_admin(
 
 OPS_SESSION_COOKIE = "ag_ops"
 OPS_SESSION_TTL_SECONDS = 12 * 60 * 60
+OPS_LITE_COOKIE = "ag_lite"
+OPS_LITE_TTL_SECONDS = 30 * 24 * 60 * 60
 
 
 def _ops_secret() -> bytes:
@@ -855,8 +875,8 @@ def _b64url_decode(value: str) -> bytes:
     return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
 
 
-def _make_ops_session_token() -> str:
-    payload = {"scope": "ops:read", "exp": int(time.time()) + OPS_SESSION_TTL_SECONDS}
+def _make_signed_scope_token(scope: str, ttl_seconds: int) -> str:
+    payload = {"scope": scope, "exp": int(time.time()) + ttl_seconds}
     body = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
     signature = _b64url_encode(
         hmac.new(_ops_secret(), body.encode("utf-8"), hashlib.sha256).digest()
@@ -864,7 +884,7 @@ def _make_ops_session_token() -> str:
     return f"{body}.{signature}"
 
 
-def _ops_session_valid(token: Optional[str]) -> bool:
+def _signed_scope_token_valid(token: Optional[str], scope: str) -> bool:
     if not token or "." not in token:
         return False
     body, supplied = token.split(".", 1)
@@ -875,9 +895,37 @@ def _ops_session_valid(token: Optional[str]) -> bool:
         return False
     try:
         payload = json.loads(_b64url_decode(body))
-        return payload.get("scope") == "ops:read" and int(payload.get("exp", 0)) > int(time.time())
+        return payload.get("scope") == scope and int(payload.get("exp", 0)) > int(time.time())
     except (ValueError, TypeError, binascii.Error):
         return False
+
+
+def _make_ops_session_token() -> str:
+    return _make_signed_scope_token("ops:read", OPS_SESSION_TTL_SECONDS)
+
+
+def _ops_session_valid(token: Optional[str]) -> bool:
+    return _signed_scope_token_valid(token, "ops:read")
+
+
+def _make_ops_lite_token() -> str:
+    return _make_signed_scope_token("ops:lite:read", OPS_LITE_TTL_SECONDS)
+
+
+def _ops_lite_session_valid(token: Optional[str]) -> bool:
+    return _signed_scope_token_valid(token, "ops:lite:read")
+
+
+def _check_ops_lite_credentials(key: str, catch_phrase: str) -> None:
+    if not OPS_LITE_KEY or not OPS_LITE_CATCH:
+        raise HTTPException(status_code=503, detail="Read-only operator view is not configured.")
+    if (
+        not key
+        or not catch_phrase
+        or not hmac.compare_digest(key, OPS_LITE_KEY)
+        or not hmac.compare_digest(catch_phrase, OPS_LITE_CATCH)
+    ):
+        raise HTTPException(status_code=401, detail="Invalid read key or catch phrase.")
 
 
 async def verify_ops_or_admin(
@@ -885,8 +933,10 @@ async def verify_ops_or_admin(
     x_agentgrid_admin_key: Optional[str] = Header(None, alias="X-AgentGrid-Admin-Key"),
     x_agentgrid_admin_mfa: Optional[str] = Header(None, alias="X-AgentGrid-Admin-MFA"),
 ) -> bool:
-    """Allow the read-only /ops cookie or the existing admin key + TOTP headers."""
+    """Allow a read-only session cookie or the existing admin key + TOTP headers."""
     if _ops_session_valid(request.cookies.get(OPS_SESSION_COOKIE)):
+        return True
+    if _ops_lite_session_valid(request.cookies.get(OPS_LITE_COOKIE)):
         return True
     _check_admin_credentials(x_agentgrid_admin_key, x_agentgrid_admin_mfa)
     return True
@@ -1060,6 +1110,8 @@ class RecordStatementPaymentRequest(BaseModel):
 class AdminSessionRequest(BaseModel):
     admin_key: str = Field(..., min_length=1)
     mfa: str = Field(..., min_length=1, max_length=6)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -3002,6 +3054,237 @@ async def delete_ops_session() -> JSONResponse:
     response = JSONResponse({"status": "ok"})
     response.delete_cookie(OPS_SESSION_COOKIE, path="/", samesite="strict")
     return response
+
+
+# ---------------------------------------------------------------------------
+# Simple read-only operator view: one read key + catch phrase, no TOTP.
+# ---------------------------------------------------------------------------
+OPS_LITE_STYLE = """
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#08101f;color:#eaf0ff;font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:28px 20px 60px}
+h1{margin:0 0 .2rem;font-size:2rem}
+h2{margin:2rem 0 .7rem;border-bottom:1px solid #243456;padding-bottom:.35rem}
+a{color:#7ee7c7}
+.muted{color:#9db0d0}
+.card{background:#111c34;border:1px solid #243456;border-radius:12px;padding:16px 18px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:18px 0}
+.stat .n{font-size:1.8rem;font-weight:700;color:#7ee7c7}
+.stat .l{font-size:.85rem;color:#9db0d0}
+label{display:block;margin:12px 0 4px;font-weight:600}
+input{width:100%;max-width:420px;padding:10px 12px;border-radius:8px;border:1px solid #2c3d63;background:#0d172b;color:#eaf0ff}
+button{margin-top:16px;padding:10px 16px;border:0;border-radius:8px;background:#7ee7c7;color:#08101f;font-weight:700;cursor:pointer}
+.error{background:#40202a;border:1px solid #a3445d;color:#ffd9e1;border-radius:8px;padding:10px 14px;margin:14px 0}
+table{width:100%;border-collapse:collapse;margin-top:10px}
+th,td{padding:9px 8px;border-bottom:1px solid #243456;text-align:left;vertical-align:top}
+th{color:#9db0d0;font-size:.85rem;text-transform:uppercase;letter-spacing:.04em}
+code{background:#15213c;padding:2px 6px;border-radius:5px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap}
+</style>
+"""
+
+
+def _lite_esc(value: Any) -> str:
+    return html.escape(str(value if value is not None else ""), quote=True)
+
+
+def _ops_lite_headers() -> dict[str, str]:
+    return {"X-Robots-Tag": "noindex, nofollow"}
+
+
+def _ops_lite_shell(title: str, body: str) -> str:
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{_lite_esc(title)}</title>{OPS_LITE_STYLE}</head><body><div class="wrap">{body}</div></body></html>"""
+
+
+def _ops_lite_login_html(error: str = "") -> str:
+    error_html = f'<div class="error">{_lite_esc(error)}</div>' if error else ""
+    return _ops_lite_shell(
+        "AgentGrid · Read-only operator view",
+        f"""
+<h1>AgentGrid snapshot</h1>
+<p class="muted">User counts and recent client details. No TOTP needed for this view.</p>
+{error_html}
+<div class="card">
+<form method="post" action="/v1/ops-lite/session">
+<label for="key">Read key</label>
+<input id="key" name="key" autocomplete="off" required>
+<label for="catch_phrase">Catch phrase</label>
+<input id="catch_phrase" name="catch_phrase" autocomplete="off" required>
+<button type="submit">Open snapshot</button>
+</form>
+</div>
+<p class="muted">This view is read-only. Admin changes still use the protected console.</p>
+""",
+    )
+
+
+def _ops_lite_stat(label: str, value: Any) -> str:
+    return f'<div class="card stat"><div class="n">{_lite_esc(value)}</div><div class="l">{_lite_esc(label)}</div></div>'
+
+
+def _ops_lite_dashboard_html(stats: dict[str, Any], clients: list[dict[str, Any]]) -> str:
+    public = stats.get("public_users", {})
+    all_accounts = stats.get("all_accounts", {})
+    cards = "".join(
+        [
+            _ops_lite_stat("Public users", public.get("total", 0)),
+            _ops_lite_stat("Verified", public.get("verified", 0)),
+            _ops_lite_stat("Pending", stats.get("unverified_signups", 0)),
+            _ops_lite_stat("Active users", public.get("active_users", 0)),
+            _ops_lite_stat("Agents", public.get("agents", 0)),
+            _ops_lite_stat("Handoffs", public.get("handoffs", 0)),
+            _ops_lite_stat("All accounts", all_accounts.get("total", 0)),
+        ]
+    )
+    rows = []
+    for client in clients:
+        client_id = _lite_esc(client.get("client_id"))
+        rows.append(
+            "<tr>"
+            f'<td><a href="/ops-lite/client/{client_id}"><code>{client_id}</code></a></td>'
+            f'<td>{_lite_esc(client.get("email") or "—")}</td>'
+            f'<td>{_lite_esc(client.get("signal"))}</td>'
+            f'<td>{_lite_esc(client.get("tier"))}</td>'
+            f'<td>{_lite_esc(client.get("agent_count", 0))}</td>'
+            f'<td>{_lite_esc(client.get("handoff_count", 0))}</td>'
+            f'<td>{_lite_esc(str(client.get("created_at") or "")[:10])}</td>'
+            "</tr>"
+        )
+    table_rows = "".join(rows) or '<tr><td colspan="7" class="muted">No clients yet.</td></tr>'
+    generated = _lite_esc(stats.get("generated_at"))
+    return _ops_lite_shell(
+        "AgentGrid · Snapshot",
+        f"""
+<div class="top"><div><h1>AgentGrid snapshot</h1>
+<p class="muted">Generated {generated}. Read-only.</p></div>
+<form method="post" action="/v1/ops-lite/logout"><button type="submit">Sign out</button></form>
+</div>
+<div class="grid">{cards}</div>
+<h2>Recent clients</h2>
+<table><thead><tr><th>Client ID</th><th>Email</th><th>Signal</th><th>Tier</th><th>Agents</th><th>Handoffs</th><th>Created</th></tr></thead>
+<tbody>{table_rows}</tbody></table>
+""",
+    )
+
+
+def _ops_lite_detail_html(detail: dict[str, Any]) -> str:
+    usage = detail.get("usage", {})
+    events = detail.get("recent_billing_events", [])
+    event_rows = "".join(
+        "<tr>"
+        f'<td>{_lite_esc(event.get("created_at"))}</td>'
+        f'<td>{_lite_esc(event.get("action"))}</td>'
+        f'<td>{_lite_esc(event.get("tier"))}</td>'
+        f'<td>{_lite_esc(event.get("cashfree_order_id") or "—")}</td>'
+        "</tr>"
+        for event in events
+    ) or '<tr><td colspan="4" class="muted">No billing events.</td></tr>'
+    return _ops_lite_shell(
+        "AgentGrid · Client detail",
+        f"""
+<p><a href="/ops-lite">← Back to snapshot</a></p>
+<h1>{_lite_esc(detail.get("client_id"))}</h1>
+<div class="grid">
+{_ops_lite_stat("Tier", detail.get("tier"))}
+{_ops_lite_stat("Payment", detail.get("payment_status"))}
+{_ops_lite_stat("Amount due", detail.get("amount_due_usd"))}
+{_ops_lite_stat("Agents", usage.get("agents", 0))}
+{_ops_lite_stat("Handoffs", usage.get("handoffs", 0))}
+</div>
+<p class="muted">Cycle {_lite_esc(detail.get("cycle_start"))} → {_lite_esc(detail.get("cycle_end"))} · Invoice {_lite_esc(detail.get("invoice_id"))}</p>
+<h2>Recent billing events</h2>
+<table><thead><tr><th>When</th><th>Action</th><th>Tier</th><th>Order</th></tr></thead><tbody>{event_rows}</tbody></table>
+""",
+    )
+
+
+@app.post("/v1/ops-lite/session")
+async def create_ops_lite_session(request: Request) -> Any:
+    fields: dict[str, str] = {}
+    if "application/json" in request.headers.get("content-type", "").lower():
+        try:
+            raw_json = await request.json()
+            if isinstance(raw_json, dict):
+                fields = {str(k): str(v) for k, v in raw_json.items()}
+        except (ValueError, TypeError):
+            fields = {}
+    else:
+        body = (await request.body()).decode("utf-8", errors="replace")
+        fields = dict(parse_qsl(body, keep_blank_values=True))
+    key = fields.get("key", "")[:256]
+    catch_phrase = fields.get("catch_phrase", "")[:256]
+    try:
+        _check_ops_lite_credentials(key, catch_phrase)
+    except HTTPException as exc:
+        return HTMLResponse(
+            _ops_lite_login_html(str(exc.detail)),
+            status_code=exc.status_code,
+            headers=_ops_lite_headers(),
+        )
+    response = RedirectResponse("/ops-lite", status_code=303)
+    response.set_cookie(
+        OPS_LITE_COOKIE,
+        _make_ops_lite_token(),
+        max_age=OPS_LITE_TTL_SECONDS,
+        httponly=True,
+        secure=APP_ENV == "production",
+        samesite="none" if APP_ENV == "production" else "lax",
+        path="/",
+    )
+    return response
+
+
+@app.post("/v1/ops-lite/logout")
+async def delete_ops_lite_session() -> RedirectResponse:
+    response = RedirectResponse("/ops-lite", status_code=303)
+    response.delete_cookie(
+        OPS_LITE_COOKIE,
+        path="/",
+        samesite="none" if APP_ENV == "production" else "lax",
+    )
+    return response
+
+
+def _ops_lite_authorized(request: Request) -> bool:
+    return _ops_lite_session_valid(
+        request.cookies.get(OPS_LITE_COOKIE)
+    ) or _ops_session_valid(request.cookies.get(OPS_SESSION_COOKIE))
+
+
+@app.get("/ops-lite", response_class=HTMLResponse)
+async def ops_lite_page(request: Request, db: AsyncSession = Depends(get_db)) -> HTMLResponse:
+    if not _ops_lite_authorized(request):
+        return HTMLResponse(_ops_lite_login_html(), headers=_ops_lite_headers())
+    stats = await admin_stats(limit=5_000, authorized=True, db=db)
+    clients = await admin_list_clients(limit=200, authorized=True, db=db)
+    return HTMLResponse(
+        _ops_lite_dashboard_html(stats, clients.get("clients", [])),
+        headers=_ops_lite_headers(),
+    )
+
+
+@app.get("/ops-lite/client/{client_id}", response_class=HTMLResponse)
+async def ops_lite_client_page(
+    client_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> HTMLResponse:
+    if not _ops_lite_authorized(request):
+        return HTMLResponse(_ops_lite_login_html(), headers=_ops_lite_headers())
+    try:
+        detail = await admin_client_status(client_id, authorized=True, db=db)
+    except HTTPException as exc:
+        body = _ops_lite_shell(
+            "AgentGrid · Not found",
+            f'<p><a href="/ops-lite">← Back to snapshot</a></p><h1>Client not found</h1><div class="error">{_lite_esc(exc.detail)}</div>',
+        )
+        return HTMLResponse(body, status_code=exc.status_code, headers=_ops_lite_headers())
+    return HTMLResponse(_ops_lite_detail_html(detail), headers=_ops_lite_headers())
 
 
 def _signup_signal(client: ClientModel, agent_count: int, handoff_count: int) -> str:
