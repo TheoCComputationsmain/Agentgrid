@@ -4,15 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "theoc-agentgrid-protocol"
-version = "0.2.0"
+version = "0.2.1"
 description = "Signed agent identity, handoffs, and receipts for AgentGrid"
 readme = "README.md"
 requires-python = ">=3.10"
+keywords = ["agents", "identity", "ed25519", "handoff", "receipts", "audit", "ai", "multi-agent"]
 dependencies = [
     "cryptography>=42,<51",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
+    "Intended Audience :: Developers",
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 
@@ -22,6 +24,7 @@ agrid = "agentgrid_protocol.cli:main"
 [project.urls]
 Homepage = "https://agentgrid-pied.vercel.app"
 Documentation = "https://agentgrid-pied.vercel.app/docs"
+Source = "https://github.com/TheoCComputationsmain/Agentgrid"
 
 [tool.setuptools]
 packages = ["agentgrid_protocol"]
