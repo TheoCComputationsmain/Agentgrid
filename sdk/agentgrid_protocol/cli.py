@@ -49,6 +49,23 @@ def _next_steps(client: AgentGrid) -> None:
     print("API:   " + client.base_url + "/docs")
 
 
+def _print_legacy_notice(client: AgentGrid, me: Optional[dict] = None) -> None:
+    """Surface the self-service upgrade to pre-email accounts without outreach."""
+    if me is None:
+        try:
+            me = client.me()
+        except Exception:
+            return
+    if not me or not me.get("legacy_upgrade_available"):
+        return
+    print()
+    print("NOTICE: This account was created before email verification.")
+    print("  Upgrade: agrid update --email you@example.com")
+    print("  Then:    agrid verify <code>")
+    print("  Your current key is replaced after verification.")
+    print()
+
+
 def cmd_register(args: argparse.Namespace) -> int:
     client = _client(args)
     email = (args.email or "").strip()
@@ -147,6 +164,7 @@ def cmd_login(args: argparse.Namespace) -> int:
         raise AgentGridError(0, "That does not look like an AgentGrid API key (expected agk_...).")
     path = save_api_key(key)
     print("Logged in. Key stored at " + str(path) + " (not displayed).")
+    _print_legacy_notice(_client(args))
     return 0
 
 
@@ -158,6 +176,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     me = client.me()
     print("Client: " + str(me.get("client_id")) + " / tier: " + str(me.get("tier")))
     print("Cycle: " + str(me.get("cycle_start")) + " -> " + str(me.get("cycle_end")))
+    _print_legacy_notice(client, me)
     return 0
 
 
@@ -181,13 +200,16 @@ def _print_quickstart_result(client: AgentGrid, result: dict) -> None:
 def cmd_quickstart(args: argparse.Namespace) -> int:
     _require_key(args)
     client = _client(args)
+    _print_legacy_notice(client)
     _print_quickstart_result(client, client.quickstart())
     return 0
 
 
 def cmd_statement(args: argparse.Namespace) -> int:
     _require_key(args)
-    statement = _client(args).statement(args.cycle_start)
+    client = _client(args)
+    _print_legacy_notice(client)
+    statement = client.statement(args.cycle_start)
     print("Invoice: " + str(statement.get("invoice_id")))
     print("Cycle: " + str(statement.get("cycle_start")) + " -> " + str(statement.get("cycle_end")))
     print("Tier: " + str(statement.get("tier")) + " / status: " + str(statement.get("payment_status")))
@@ -214,7 +236,9 @@ def cmd_card(args: argparse.Namespace) -> int:
 
 def cmd_receipts(args: argparse.Namespace) -> int:
     _require_key(args)
-    data = _client(args).receipts(args.agent_id)
+    client = _client(args)
+    _print_legacy_notice(client)
+    data = client.receipts(args.agent_id)
     items = data.get("receipts", [])
     print("Agent: " + str(args.agent_id) + " / receipts: " + str(data.get("count", len(items))))
     for receipt in items:

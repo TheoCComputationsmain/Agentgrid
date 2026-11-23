@@ -376,6 +376,48 @@ def test_cli_quickstart_prints_success(monkeypatch, capsys):
     assert "agk_test_key" not in output
 
 
+def test_cli_doctor_surfaces_legacy_upgrade_notice(monkeypatch, capsys):
+    class Fake:
+        base_url = "https://agentgrid-pied.vercel.app"
+
+        def health(self):
+            return {"status": "ok", "database": "connected"}
+
+        def me(self):
+            return {
+                "client_id": "cli_legacy",
+                "tier": "free",
+                "cycle_start": "2026-11-01",
+                "cycle_end": "2026-12-01",
+                "legacy_upgrade_available": True,
+            }
+
+    monkeypatch.setattr(cli, "load_api_key", lambda: "agk_legacy")
+    monkeypatch.setattr(cli, "AgentGrid", lambda **kwargs: Fake())
+
+    assert cli.main(["doctor"]) == 0
+    output = capsys.readouterr().out
+    assert "Client: cli_legacy" in output
+    assert "NOTICE: This account was created before email verification" in output
+    assert "agrid update --email you@example.com" in output
+    assert "agrid verify <code>" in output
+    assert "agk_legacy" not in output
+
+
+def test_cli_quickstart_surfaces_legacy_upgrade_notice(monkeypatch, capsys):
+    client, _ = fake_client()
+    client.me = lambda: {"client_id": "cli_legacy", "legacy_upgrade_available": True}
+    monkeypatch.setenv("AGENTGRID_API_KEY", "agk_test_key")
+    monkeypatch.setattr(cli, "AgentGrid", lambda **kwargs: client)
+
+    assert cli.main(["quickstart"]) == 0
+    output = capsys.readouterr().out
+    assert "NOTICE: This account was created before email verification" in output
+    assert "agrid update --email you@example.com" in output
+    assert "Signed handoff accepted" in output
+    assert "agk_test_key" not in output
+
+
 def test_cli_receipts_prints_receipt_details(monkeypatch, capsys):
     class Fake:
         base_url = "https://agentgrid-pied.vercel.app"

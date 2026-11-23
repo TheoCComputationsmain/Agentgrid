@@ -37,7 +37,13 @@ receipt, so there is no fourth command. Pass `--no-quickstart` to skip it, or ru
 ### Signed up before email verification?
 
 If your client was created before we required email, it has a key but no email on
-file. Run `agrid update --email you@example.com` with that key still saved
+file. You do not need to be told: `agrid doctor`, `agrid login`,
+`agrid quickstart`, `agrid statement`, and `agrid receipts` print a notice with
+the upgrade command when they see a legacy account. `GET /v1/clients/me` also
+returns `legacy_upgrade_available` and `next_step`, so custom clients can surface
+the same prompt.
+
+Run `agrid update --email you@example.com` with the existing key still saved
 locally, then `agrid verify <code>` with the emailed code. Your current key stops
 working while the code is pending and is replaced at verification. If you lost
 the old key, register a new free client.

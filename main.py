@@ -1119,6 +1119,11 @@ offline, signs a handoff, and prints the receipt — no fourth command. Use
 <code>agrid verify &lt;code&gt; --no-quickstart</code> to skip it. See the
 <a href="/guide">developer guide</a> for Python usage, framework drop-ins, and API details.</p>
 
+<div class="note"><strong>Already using AgentGrid from before email verification?</strong>
+Run <code>agrid doctor</code> with your existing key. Legacy accounts automatically show a
+self-service update command; no one needs to contact you. You can also go straight to
+<code>agrid update --email you@example.com</code> and then <code>agrid verify &lt;code&gt;</code>.</div>
+
 <h2>Pricing</h2>
 <table><thead><tr><th>Tier</th><th>Base</th><th>Agents</th><th>Handoffs / cycle</th><th>Pay</th></tr></thead>
 <tbody>
@@ -1173,6 +1178,13 @@ agrid receipts &lt;agent_id&gt;  # the worker ID from step 2</pre>
 <p class="muted">Already have a key? Use <code>agrid login</code> or set <code>AGENTGRID_API_KEY</code>.
 Need a framework drop-in? Copy <code>examples/langgraph_handoff.py</code> from the repository
 into your LangGraph, CrewAI, or OpenAI Agents SDK project. Stuck? Jump to the <a href="#faq">FAQ</a>.</p>
+
+<p><strong>Pre-email legacy account?</strong> Your own CLI will surface the update command when you
+run <code>agrid doctor</code>, <code>agrid quickstart</code>, <code>agrid statement</code>,
+<code>agrid receipts</code>, or <code>agrid login</code>. The API also returns
+<code>legacy_upgrade_available</code> and <code>next_step</code> from
+<code>GET /v1/clients/me</code>. To upgrade, run
+<code>agrid update --email you@example.com</code>, then <code>agrid verify &lt;code&gt;</code>.</p>
 
 <h2>Registration details</h2>
 <pre>pip install theoc-agentgrid-protocol
@@ -1343,8 +1355,10 @@ They contain the task hash, not the raw task. CLI equivalent:
 
 <h2>Useful endpoints</h2>
 <table><thead><tr><th>Method</th><th>Path</th><th>Purpose</th></tr></thead><tbody>
-<tr><td>POST</td><td><code>/v1/clients/register</code></td><td>Register a free client (open self-service) with optional email</td></tr>
+<tr><td>POST</td><td><code>/v1/clients/register</code></td><td>Register a free client (open self-service) with a required email</td></tr>
+<tr><td>GET</td><td><code>/v1/clients/me</code></td><td>Account status, including the legacy-account upgrade signal</td></tr>
 <tr><td>PATCH</td><td><code>/v1/clients/me/email</code></td><td>Set or update the recovery email</td></tr>
+<tr><td>POST</td><td><code>/v1/clients/me/upgrade-email</code></td><td>Start self-service email verification for a pre-email account</td></tr>
 <tr><td>POST</td><td><code>/v1/agents</code></td><td>Create an agent with its public key</td></tr>
 <tr><td>GET</td><td><code>/v1/agents/{id}.json</code></td><td>Get the signed Agent Card</td></tr>
 <tr><td>GET</td><td><code>/v1/agents/{id}/verify</code></td><td>Online signature check</td></tr>
@@ -2045,6 +2059,7 @@ async def get_my_client(
     await db.commit()
     tier = active_tier(client)
     cycle_tier = client.cycle_tier or tier
+    legacy_upgrade = bool(client.email_verified and not client.email)
     return {
         "client_id": client.client_id,
         "tier": tier,
@@ -2056,6 +2071,12 @@ async def get_my_client(
         "cycle_end": client.cycle_end,
         "access_expires_at": client.access_expires_at,
         "prices_usd": TIER_PRICES_USD,
+        "email_on_file": bool(client.email),
+        "legacy_upgrade_available": legacy_upgrade,
+        "next_step": (
+            "Run `agrid update --email you@example.com` then `agrid verify <code>` "
+            "to add email verification to this pre-email account."
+        ) if legacy_upgrade else None,
     }
 
 

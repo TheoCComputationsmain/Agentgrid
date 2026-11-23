@@ -120,6 +120,9 @@ def test_open_registration_and_api_key_auth(api):
     me = api.get("/v1/clients/me", headers=_headers(registered["api_key"]))
     assert me.status_code == 200
     assert me.json()["client_id"] == registered["client_id"]
+    assert me.json()["email_on_file"] is True
+    assert me.json()["legacy_upgrade_available"] is False
+    assert me.json()["next_step"] is None
 
 
 def test_admin_assisted_registration(api):
@@ -565,7 +568,11 @@ def test_legacy_account_upgrade_verifies_email_and_rotates_key(api):
             "verification_sent_at = NULL WHERE client_id = ?",
             (legacy_id,),
         )
-    assert api.get("/v1/clients/me", headers=_headers(old_key)).status_code == 200
+    before = api.get("/v1/clients/me", headers=_headers(old_key))
+    assert before.status_code == 200
+    assert before.json()["email_on_file"] is False
+    assert before.json()["legacy_upgrade_available"] is True
+    assert "agrid update --email" in before.json()["next_step"]
 
     upgrade = api.post(
         "/v1/clients/me/upgrade-email",
@@ -588,7 +595,11 @@ def test_legacy_account_upgrade_verifies_email_and_rotates_key(api):
     assert verified.status_code == 200, verified.text
     new_key = verified.json()["api_key"]
     assert new_key != old_key
-    assert api.get("/v1/clients/me", headers=_headers(new_key)).status_code == 200
+    after = api.get("/v1/clients/me", headers=_headers(new_key))
+    assert after.status_code == 200
+    assert after.json()["email_on_file"] is True
+    assert after.json()["legacy_upgrade_available"] is False
+    assert after.json()["next_step"] is None
 
     again = api.post(
         "/v1/clients/me/upgrade-email",

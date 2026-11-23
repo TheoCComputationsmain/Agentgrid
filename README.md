@@ -77,9 +77,11 @@ agrid verify 123456          # code from your inbox; first handoff runs automati
 ```
 
 Signed up before email verification? If your client has a key but no email on
-file, run `agrid update --email you@example.com`, then `agrid verify <code>`.
-Your current key stops working while the code is pending and is replaced at
-verification; if you lost the old key, register a new free client.
+file, `agrid doctor` (and normal commands such as `agrid quickstart`,
+`agrid statement`, or `agrid receipts`) prints the upgrade command automatically.
+You can also go straight to `agrid update --email you@example.com`, then
+`agrid verify <code>`. Your current key stops working while the code is pending
+and is replaced at verification; if you lost the old key, register a new free client.
 
 `agrid quickstart` registers two agents, verifies a signed card online and
 offline, records a signed handoff, and reads the immutable receipt. Import it as

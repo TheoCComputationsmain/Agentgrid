@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "theoc-agentgrid-protocol"
-version = "0.2.5"
+version = "0.2.6"
 description = "Signed agent identity, handoffs, and receipts for AgentGrid"
 readme = "README.md"
 requires-python = ">=3.10"
