@@ -1,5 +1,9 @@
 # AgentGrid
 
+[![PyPI version](https://img.shields.io/pypi/v/theoc-agentgrid-protocol.svg)](https://pypi.org/project/theoc-agentgrid-protocol/)
+[![Python versions](https://img.shields.io/pypi/pyversions/theoc-agentgrid-protocol.svg)](https://pypi.org/project/theoc-agentgrid-protocol/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/TheoCComputationsmain/Agentgrid/blob/main/LICENSE)
+
 Signed identity, discovery, and handoff receipts for AI agents.
 
 AgentGrid is infrastructure for agents, not another chatbot. Developers register

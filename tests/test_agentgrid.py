@@ -1225,6 +1225,10 @@ def test_guide_has_three_step_quickstart_recipes_and_faq(api):
         "offline-verify",
         "scoped-handoff",
         "receipt-read",
+        "scope-design",
+        "receipt-design",
+        "How scoped delegation works",
+        "What a receipt records",
         "FAQ",
         "invite token",
     ):

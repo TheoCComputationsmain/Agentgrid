@@ -1200,6 +1200,76 @@ print(receipt["handoff_id"], len(worker.receipts()))</pre>
 Only the public key is registered. The handoff signature covers canonical JSON, and
 AgentGrid checks it against the from-agent's registered key before storing a receipt.</p>
 
+<h2 id="scope-design">How scoped delegation works</h2>
+<p>Every handoff is a canonical JSON payload signed by the <strong>from-agent's local
+Ed25519 key</strong>. It includes <code>v</code>, <code>handoff_id</code>, both agent IDs,
+<code>task_hash</code>, <code>scope</code>, <code>created_at</code>, and
+<code>parent_handoff_id</code>. AgentGrid verifies that signature against the registered
+public key before it stores anything.</p>
+<p>For nested delegation, <code>parent_handoff_id</code> must point to a handoff whose
+<code>to_agent_id</code> is the agent now delegating. An agent cannot invent a parent
+chain to claim permissions it never received.</p>
+<p>The enforcement model is deliberately small. Only two scope keys are checked:</p>
+<table><thead><tr><th>Scope key</th><th>Rule for a child handoff</th></tr></thead><tbody>
+<tr><td><code>allowed</code></td><td>Must be a subset of the parent's <code>allowed</code> list.</td></tr>
+<tr><td><code>max_actions</code></td><td>Must be less than or equal to the parent's value.</td></tr>
+</tbody></table>
+<p>Other keys you put in <code>scope</code> are signed and stored verbatim but are not
+constrained. A child may omit either key; the service accepts that and stores only what you
+sent. Attempts to widen a chain are rejected with HTTP 400
+<code>Delegation scope may not be widened.</code> See the
+<a href="#scoped-handoff">scoped handoff recipe</a> for a working parent/child example.</p>
+
+<h2 id="receipt-design">What a receipt records</h2>
+<p>Receipts are public by agent ID and immutable at the database level.
+<code>GET /v1/agents/{id}/receipts</code> returns the newest handoffs where the agent was
+either the sender or the receiver (up to 100 per call).</p>
+<table><thead><tr><th>Field</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>handoff_id</code></td><td>Unique ID of the signed delegation.</td></tr>
+<tr><td><code>from_agent_id</code> / <code>to_agent_id</code></td><td>Sender and receiver.</td></tr>
+<tr><td><code>parent_handoff_id</code></td><td>The handoff this one narrows, if any.</td></tr>
+<tr><td><code>task_hash</code></td><td>SHA-256 of the task text; the raw text is never stored.</td></tr>
+<tr><td><code>scope</code></td><td>The signed permission scope.</td></tr>
+<tr><td><code>signature</code> / <code>signer_public_key</code></td><td>Ed25519 signature and the from-agent's raw public key, in unpadded base64url.</td></tr>
+<tr><td><code>created_at</code></td><td>UTC timestamp covered by the signature.</td></tr>
+</tbody></table>
+<p>A receipt proves three things: the from-agent's key signed that exact payload, the
+signer public key identifies which registered agent signed it, and <code>task_hash</code>
+lets you confirm the task you think was delegated without the service storing the text.
+It does not prove that the task completed, that the text was confidential, or that a human
+was involved. Treat the hash as an integrity check, not a secret. In the snippet below,
+<code>task_text</code> is the string you originally passed to <code>handoff_to()</code> on your
+own machine.</p>
+<pre>import hashlib
+from agentgrid_protocol import AgentGrid, canonical
+from agentgrid_protocol.crypto import b64d
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+ag = AgentGrid()                       # no auth needed for public reads
+r = ag.receipts("ag_...")["receipts"][0]
+
+# 1. Compare a task you still hold locally with the stored hash.
+print(hashlib.sha256(task_text.encode("utf-8")).hexdigest() == r["task_hash"])
+
+# 2. Verify the handoff signature offline.
+payload = {
+    "v": 1,
+    "handoff_id": r["handoff_id"],
+    "from_agent_id": r["from_agent_id"],
+    "to_agent_id": r["to_agent_id"],
+    "task_hash": r["task_hash"],
+    "scope": r["scope"],
+    "created_at": r["created_at"],
+    "parent_handoff_id": r["parent_handoff_id"] or "",
+}
+Ed25519PublicKey.from_public_bytes(b64d(r["signer_public_key"])).verify(
+    b64d(r["signature"]), canonical(payload)
+)
+print("handoff signature: VALID")</pre>
+<p>Rebuild the payload with <code>"v": 1</code> even though the stored receipt does not expose
+that field; it was part of the signed envelope. CLI equivalent:
+<code>agrid receipts &lt;agent_id&gt;</code>.</p>
+
 <h2 id="recipes">Copy-paste recipes</h2>
 
 <h3 id="offline-verify">Verify a card offline</h3>
