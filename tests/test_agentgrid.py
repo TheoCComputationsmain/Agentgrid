@@ -960,6 +960,16 @@ def test_rate_limit_uses_shared_counter_for_postgres(monkeypatch):
     assert calls == ["bucket"]
 
 
+def test_lambda_handler_is_callable():
+    # The public repo is the Vercel-only source; the AWS Lambda adapter is not
+    # shipped here. Skip instead of failing when that file is absent.
+    if not (Path(__file__).resolve().parents[1] / "lambda_handler.py").exists():
+        pytest.skip("lambda_handler.py is not part of the public Vercel-only repo")
+    import lambda_handler
+
+    assert callable(lambda_handler.handler)
+
+
 def test_admin_status_shows_access_and_billing_events(api):
     client = _register(api)
     headers = {"X-AgentGrid-Admin-Key": "test-admin-key", "X-AgentGrid-Admin-MFA": _totp()}
@@ -1014,3 +1024,90 @@ def test_admin_list_clients_returns_overview(api):
     assert row["tier"] == "free"
     assert row["payment_status"] == "current"
     assert row["invoice_id"].startswith("inv_")
+
+
+def test_guide_has_three_step_quickstart_recipes_and_faq(api):
+    guide = api.get("/guide").text
+    assert "Start here: 3 steps" in guide
+    for marker in (
+        "agrid register",
+        "agrid quickstart",
+        "agrid card",
+        "agrid receipts",
+        "Copy-paste recipes",
+        "offline-verify",
+        "scoped-handoff",
+        "receipt-read",
+        "FAQ",
+        "invite token",
+    ):
+        assert marker in guide, marker
+    description = api.get("/openapi.json").json()["info"]["description"]
+    assert "agrid quickstart" in description
+    assert "developer guide" in description
+
+
+def test_welcome_email_sends_three_steps_without_api_key(api, monkeypatch):
+    import welcome_email
+
+    captured: list[tuple] = []
+    monkeypatch.setenv(welcome_email.WEBHOOK_URL_ENV, "https://example.test/hook")
+    monkeypatch.setenv(welcome_email.WEBHOOK_TOKEN_ENV, "webhook-token")
+    monkeypatch.setattr(
+        welcome_email,
+        "_poster",
+        lambda url, payload, token: captured.append((url, payload, token)),
+    )
+
+    cid = "welcome_" + uuid.uuid4().hex[:10]
+    response = api.post(
+        "/v1/clients/register", json={"client_id": cid, "email": "New.User@Example.com"}
+    )
+    assert response.status_code == 201, response.text
+    assert len(captured) == 1
+
+    url, payload, token = captured[0]
+    assert url == "https://example.test/hook"
+    assert token == "webhook-token"
+    assert payload["to"] == "new.user@example.com"
+    assert payload["client_id"] == cid
+    assert payload["type"] == "agentgrid.welcome"
+    assert "3 steps" in payload["subject"]
+    for step in ("agrid quickstart", "agrid card", "agrid receipts"):
+        assert step in payload["text"]
+        assert step in payload["html"]
+    api_key = response.json()["api_key"]
+    assert api_key not in payload["text"]
+    assert api_key not in payload["html"]
+
+
+def test_welcome_email_failure_never_breaks_registration(api, monkeypatch):
+    import welcome_email
+
+    monkeypatch.setenv(welcome_email.WEBHOOK_URL_ENV, "https://example.test/hook")
+    monkeypatch.delenv(welcome_email.WEBHOOK_TOKEN_ENV, raising=False)
+
+    def boom(url, payload, token):
+        raise RuntimeError("webhook down")
+
+    monkeypatch.setattr(welcome_email, "_poster", boom)
+    cid = "welcome_" + uuid.uuid4().hex[:10]
+    response = api.post(
+        "/v1/clients/register", json={"client_id": cid, "email": "down@example.com"}
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["client_id"] == cid
+
+
+def test_welcome_email_disabled_without_webhook(api, monkeypatch):
+    import welcome_email
+
+    monkeypatch.delenv(welcome_email.WEBHOOK_URL_ENV, raising=False)
+    captured: list[tuple] = []
+    monkeypatch.setattr(welcome_email, "_poster", lambda *args: captured.append(args))
+    cid = "nowelcome_" + uuid.uuid4().hex[:10]
+    response = api.post(
+        "/v1/clients/register", json={"client_id": cid, "email": "quiet@example.com"}
+    )
+    assert response.status_code == 201, response.text
+    assert captured == []

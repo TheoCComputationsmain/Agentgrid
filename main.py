@@ -29,6 +29,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
+from welcome_email import send_welcome_email
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -615,7 +616,20 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="AgentGrid",
     version="0.1.0",
-    description="Signed identity, discovery and handoff receipts for AI agents.",
+    description=(
+        "Signed identity, discovery and handoff receipts for AI agents.\n\n"
+        "## Three steps to your first handoff\n\n"
+        "```bash\n"
+        "pip install theoc-agentgrid-protocol\n"
+        "agrid register --email you@example.com\n"
+        "agrid quickstart\n"
+        "agrid card <agent_id>\n"
+        "agrid receipts <agent_id>\n"
+        "```\n\n"
+        "Copy-paste recipes (offline verify, scoped handoff, receipt read) and the "
+        "FAQ live in the [developer guide](/guide). Registration is open "
+        "self-service; payments happen outside AgentGrid."
+    ),
     lifespan=lifespan,
 )
 origins = [o.strip() for o in os.environ.get("AGENTGRID_CORS_ORIGINS", "").split(",") if o.strip()]
@@ -1013,7 +1027,26 @@ GUIDE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <h1>Developer guide</h1>
 <p><a href="/">&larr; Home</a></p>
 
-<h2>Install and register</h2>
+<h2 id="quickstart">Start here: 3 steps (~1 minute)</h2>
+<ol>
+<li><strong>Install and register.</strong> Run <code>pip install theoc-agentgrid-protocol</code>,
+then <code>agrid register --email you@example.com</code>. It is free and open — no invite
+token and no card. Your <code>agk_...</code> key is stored locally and never printed; back it up.</li>
+<li><strong>Run one real handoff.</strong> <code>agrid quickstart</code> creates two agents,
+verifies a card online and offline, signs a handoff, and reads its receipt. Note the
+<code>ag_...</code> IDs it prints.</li>
+<li><strong>Check the work.</strong> <code>agrid card &lt;agent_id&gt;</code> verifies a public
+card offline; <code>agrid receipts &lt;agent_id&gt;</code> reads the immutable receipts.</li>
+</ol>
+<pre>pip install theoc-agentgrid-protocol
+agrid register --email you@example.com
+agrid quickstart
+agrid card &lt;agent_id&gt;      # an ag_... ID from step 2
+agrid receipts &lt;agent_id&gt;  # the worker ID from step 2</pre>
+<p class="muted">Already have a key? Use <code>agrid login</code> or set <code>AGENTGRID_API_KEY</code>.
+Stuck? Jump to the <a href="#faq">FAQ</a>.</p>
+
+<h2>Registration details</h2>
 <pre>pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
 agrid doctor</pre>
@@ -1038,19 +1071,74 @@ print(receipt["handoff_id"], len(worker.receipts()))</pre>
 Only the public key is registered. The handoff signature covers canonical JSON, and
 AgentGrid checks it against the from-agent's registered key before storing a receipt.</p>
 
-<h2>Verify a card offline</h2>
+<h2 id="recipes">Copy-paste recipes</h2>
+
+<h3 id="offline-verify">Verify a card offline</h3>
 <pre>from agentgrid_protocol import AgentGrid, canonical, unsigned_card
 from agentgrid_protocol.crypto import b64d
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+ag = AgentGrid()                  # no auth needed for public reads
+card = ag.card("ag_...")          # any public agent ID
+keys = ag.public_keys()           # includes previous_public_key during rotation
+message = canonical(unsigned_card(card))
+signature = b64d(card["signature"])
+
+for key_b64 in (keys.get("public_key", ""), keys.get("previous_public_key", "")):
+    if not key_b64:
+        continue
+    try:
+        Ed25519PublicKey.from_public_bytes(b64d(key_b64)).verify(signature, message)
+        print("offline signature: VALID")
+        break
+    except Exception:
+        continue
+else:
+    print("offline signature: INVALID")</pre>
+<p>A card signature proves AgentGrid issued that card. Handoffs are signed separately by the
+from-agent's own local Ed25519 key. During rotation the previous platform key stays published
+so older cards remain verifiable. CLI equivalent: <code>agrid card &lt;agent_id&gt;</code>.</p>
+
+<h3 id="scoped-handoff">Record a scoped handoff</h3>
+<pre>from agentgrid_protocol import AgentGrid
+
 ag = AgentGrid()
-card = ag.card("ag_...")
-keys = ag.public_keys()
-Ed25519PublicKey.from_public_bytes(b64d(keys["public_key"])).verify(
-    b64d(card["signature"]), canonical(unsigned_card(card))
-)</pre>
-<p>During key rotation the public-key endpoint also returns <code>previous_public_key</code>,
-so older cards stay verifiable.</p>
+planner = ag.create_agent("Planner", capabilities=["plan"])
+worker = ag.create_agent("Worker", capabilities=["read"])
+
+receipt = planner.handoff_to(
+    worker,
+    task="summarize the quarterly report",
+    scope={"allowed": ["read"], "max_actions": 2},
+)
+print(receipt["handoff_id"], receipt["scope"])
+
+# A child handoff may only narrow the parent's scope:
+sub = ag.create_agent("Sub-worker", capabilities=["read"])
+child = worker.handoff_to(
+    sub,
+    task="fetch one page",
+    scope={"allowed": ["read"], "max_actions": 1},
+    parent_handoff_id=receipt["handoff_id"],
+)
+print(child["handoff_id"])</pre>
+<p><code>allowed</code> must be a subset of the parent's <code>allowed</code>, and
+<code>max_actions</code> cannot increase — attempts to widen a chain are rejected. Only a
+SHA-256 task hash is stored, never the raw task text.</p>
+
+<h3 id="receipt-read">Read a receipt</h3>
+<pre>from agentgrid_protocol import AgentGrid
+
+ag = AgentGrid()
+data = ag.receipts("ag_...")       # public: no API key needed
+for r in data["receipts"]:
+    print(r["handoff_id"], r["from_agent_id"], "-&gt;", r["to_agent_id"])
+    print("  task hash:", r["task_hash"])
+    print("  scope:", r["scope"], "created:", r["created_at"])
+print("total:", data["count"])</pre>
+<p>Receipts are immutable at the database level and readable by anyone who knows the agent ID.
+They contain the task hash, not the raw task. CLI equivalent:
+<code>agrid receipts &lt;agent_id&gt;</code>.</p>
 
 <h2>Useful endpoints</h2>
 <table><thead><tr><th>Method</th><th>Path</th><th>Purpose</th></tr></thead><tbody>
@@ -1080,6 +1168,56 @@ only for operator reconciliation; no payment details ever enter AgentGrid.</p>
 <p>Enterprise uses the shared <a href="https://payments.cashfree.com/forms/agentgrid-enterprise" target="_blank" rel="noopener">self-service form</a>;
 enter an amount between ₹212,500 and ₹425,000 ($2,500–$5,000 at the fixed ₹85 = $1 rate)
 and the same AgentGrid Client ID.</p>
+
+<h2 id="faq">FAQ</h2>
+<p class="muted">These are the questions new users hit most often. If yours is not here, tell us — this list grows from real feedback.</p>
+
+<h3>Do I need an invite token or approval?</h3>
+<p>No. <code>agrid register</code> is open self-service. The email flag is optional.</p>
+
+<h3>Where is my API key? The CLI did not print it.</h3>
+<p>By design. The service shows the <code>agk_...</code> key once and the CLI writes it to
+<code>~/.agentgrid/credentials.json</code>. Back up that file or the key; there is no secret
+recovery endpoint. If you lose it, register a new free client.</p>
+
+<h3>What does <code>agrid quickstart</code> actually do?</h3>
+<p>It creates two agents with locally generated Ed25519 keys, verifies the planner's card
+online and offline, signs a real handoff with a scope, and reads the resulting receipt. Nothing
+is simulated. Private keys never leave your machine.</p>
+
+<h3>Why verify a card "offline"?</h3>
+<p>Because the platform's public key is published at
+<a href="/v1/agents/public-key"><code>/v1/agents/public-key</code></a>. You can check a card's
+signature without asking AgentGrid, which matters when the service is unreachable or when a
+third party receives a card. See the <a href="#offline-verify">recipe</a>.</p>
+
+<h3>Can a child agent widen the scope it inherited?</h3>
+<p>No. A child's <code>allowed</code> list must be a subset of its parent's and its
+<code>max_actions</code> cannot be higher. See the <a href="#scoped-handoff">recipe</a>.</p>
+
+<h3>Are receipts public? Is my task text exposed?</h3>
+<p>Receipts are public by agent ID — anyone with the ID can read them. They store a SHA-256
+task hash, not the raw task. Treat the hash as an integrity check, not a secret, and do not put
+sensitive text in the task field.</p>
+
+<h3>Do I need a payment method to start?</h3>
+<p>No. The free tier needs no card. Payments are entirely external; AgentGrid has no wallet,
+escrow, checkout, or automatic deduction. See <a href="/">pricing</a>.</p>
+
+<h3>What happens when I hit the free limits?</h3>
+<p>Overage is metered (not blocked) up to 3× the included agents and handoffs, at $1 per 1,000
+extra handoffs plus $0.10 per extra agent per day. Past 3×, new writes return HTTP 402 until
+the next cycle or an upgrade. <code>agrid statement</code> shows the current totals.</p>
+
+<h3>How do I upgrade, and how do I change my email?</h3>
+<p>Register with the email you will pay with, get your Client ID, open the external payment
+link for your tier, and enter that exact Client ID in the form. The same email lets the operator
+fix a mistyped ID. To change it later, call
+<code>PATCH /v1/clients/me/email</code> with your API key.</p>
+
+<h3>Can I use a language other than Python?</h3>
+<p>Yes. AgentGrid is an HTTP API; the Python SDK is optional. Start from
+<a href="/openapi.json">OpenAPI</a> or the <a href="/docs">API reference</a>.</p>
 
 <p><a href="/docs">API reference</a> &middot; <a href="/openapi.json">OpenAPI</a> &middot;
 <a href="/health/ready">Health</a></p>
@@ -1142,6 +1280,7 @@ async def _create_client_db(
 @app.post("/v1/clients/register", status_code=status.HTTP_201_CREATED)
 async def register_client(
     payload: RegisterClientRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Open self-service registration for the free tier.
@@ -1149,17 +1288,21 @@ async def register_client(
     Anyone can register; there is no invite token to distribute. Abuse is
     bounded by the shared 120 req/min rate limit and the free-tier caps.
     Supplying an email is optional but lets the operator recover a mistyped
-    Client ID from a signed payment form without ever seeing payment details.
+    Client ID from a signed payment form without ever seeing payment details,
+    and triggers the three-step welcome email when a webhook is configured.
     """
     client_id = payload.client_id or "cli_" + uuid.uuid4().hex
-    return await _create_client_db(
+    result = await _create_client_db(
         db, client_id, audit_action="client.registered", email=payload.email
     )
+    await send_welcome_email(payload.email, client_id, str(request.base_url))
+    return result
 
 
 @app.post("/v1/admin/clients/register", status_code=status.HTTP_201_CREATED)
 async def admin_register_client(
     payload: RegisterClientRequest,
+    request: Request,
     authorized: bool = Depends(verify_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
@@ -1169,9 +1312,11 @@ async def admin_register_client(
     MFA configuration fails closed. The returned API key is shown only once.
     """
     client_id = payload.client_id or "cli_" + uuid.uuid4().hex
-    return await _create_client_db(
+    result = await _create_client_db(
         db, client_id, audit_action="client.registered_by_admin", email=payload.email
     )
+    await send_welcome_email(payload.email, client_id, str(request.base_url))
+    return result
 
 
 @app.get("/v1/clients/me")

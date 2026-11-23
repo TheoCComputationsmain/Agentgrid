@@ -119,7 +119,7 @@ def test_missing_key_reports_actionable_error():
     client = AgentGrid(api_key=None, transport=lambda *a: (200, {}))
     with pytest.raises(AgentGridError) as exc:
         client.me()
-    assert "agentgrid register" in exc.value.detail
+    assert "agrid register" in exc.value.detail
 
 
 def test_key_file_round_trip(tmp_path, monkeypatch):
@@ -185,6 +185,16 @@ def test_cli_register_stores_key_without_printing(monkeypatch, capsys):
     assert "cli_cli123" in output
     assert "agk_secret_from_register" not in output
     assert saved["key"] == "agk_secret_from_register"
+    # The register output must tell a brand-new user exactly what to do next.
+    assert "three steps to your first signed handoff" in output
+    for step in (
+        "agrid quickstart",
+        "agrid card <agent_id>",
+        "agrid receipts <agent_id>",
+        "/guide",
+        "/docs",
+    ):
+        assert step in output
 
 
 def test_cli_quickstart_prints_success(monkeypatch, capsys):
@@ -195,4 +205,36 @@ def test_cli_quickstart_prints_success(monkeypatch, capsys):
     output = capsys.readouterr().out
     assert "Registered agents" in output
     assert "Signed handoff accepted" in output
+    assert "agk_test_key" not in output
+
+
+def test_cli_receipts_prints_receipt_details(monkeypatch, capsys):
+    class Fake:
+        base_url = "https://agentgrid-pied.vercel.app"
+
+        def receipts(self, agent_id):
+            assert agent_id == "ag_worker"
+            return {
+                "agent_id": agent_id,
+                "count": 1,
+                "receipts": [
+                    {
+                        "handoff_id": "h_abc",
+                        "from_agent_id": "ag_planner",
+                        "to_agent_id": "ag_worker",
+                        "task_hash": "a" * 64,
+                        "scope": {"allowed": ["read"], "max_actions": 2},
+                        "created_at": "2026-11-23T00:00:00Z",
+                    }
+                ],
+            }
+
+    monkeypatch.setenv("AGENTGRID_API_KEY", "agk_test_key")
+    monkeypatch.setattr(cli, "AgentGrid", lambda **kwargs: Fake())
+    assert cli.main(["receipts", "ag_worker"]) == 0
+    output = capsys.readouterr().out
+    assert "h_abc" in output
+    assert "ag_planner -> ag_worker" in output
+    assert "a" * 64 in output
+    assert '"allowed": ["read"]' in output
     assert "agk_test_key" not in output

@@ -149,7 +149,7 @@ class AgentGrid:
         headers: dict[str, str] = {}
         if auth:
             if not self.api_key:
-                raise AgentGridError(0, "No API key. Run `agentgrid register` (or `agentgrid login`) or set AGENTGRID_API_KEY.")
+                raise AgentGridError(0, "No API key. Run `agrid register` (or `agrid login`) or set AGENTGRID_API_KEY.")
             headers["X-AgentGrid-API-Key"] = self.api_key
         status, payload = self._transport(method, path, body, headers)
         if status >= 400:

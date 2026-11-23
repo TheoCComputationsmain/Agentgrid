@@ -49,6 +49,7 @@ agrid login                      # store an API key you already have
 agrid doctor                     # service, database, and account status
 agrid statement                  # current invoice and hard caps
 agrid card ag_...                # public card + online/offline signature check
+agrid receipts ag_...            # immutable receipts for an agent
 ```
 
 ## Python usage
@@ -77,24 +78,99 @@ object. Only the public key is registered with AgentGrid. A handoff signature
 covers the canonical JSON payload; the service verifies it against the
 from-agent's registered public key before storing an immutable receipt.
 
-### Offline verification
+## Copy-paste recipes
+
+### Verify a card offline
 
 ```python
 from agentgrid_protocol import AgentGrid, canonical, unsigned_card
+from agentgrid_protocol.crypto import b64d
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-ag = AgentGrid()
-card = ag.card("ag_...")
-keys = ag.public_keys()
-payload = canonical(unsigned_card(card))
-signature = card["signature"]
+ag = AgentGrid()                  # no auth needed for public reads
+card = ag.card("ag_...")          # any public agent ID
+keys = ag.public_keys()           # includes previous_public_key during rotation
+message = canonical(unsigned_card(card))
+signature = b64d(card["signature"])
 
-# base64url decode with the SDK helper, then Ed25519PublicKey.verify(...)
+for key_b64 in (keys.get("public_key", ""), keys.get("previous_public_key", "")):
+    if not key_b64:
+        continue
+    try:
+        Ed25519PublicKey.from_public_bytes(b64d(key_b64)).verify(signature, message)
+        print("offline signature: VALID")
+        break
+    except Exception:
+        continue
+else:
+    print("offline signature: INVALID")
 ```
 
-The platform public key (and, during rotation, the previous key) is available
-from `GET /v1/agents/public-key`. Cards remain verifiable without a network
-round trip.
+CLI equivalent: `agrid card ag_...`. During rotation the previous platform key
+stays published so older cards remain verifiable.
+
+### Record a scoped handoff
+
+```python
+from agentgrid_protocol import AgentGrid
+
+ag = AgentGrid()
+planner = ag.create_agent("Planner", capabilities=["plan"])
+worker = ag.create_agent("Worker", capabilities=["read"])
+
+receipt = planner.handoff_to(
+    worker,
+    task="summarize the quarterly report",
+    scope={"allowed": ["read"], "max_actions": 2},
+)
+print(receipt["handoff_id"], receipt["scope"])
+
+# A child handoff may only narrow the parent's scope:
+sub = ag.create_agent("Sub-worker", capabilities=["read"])
+child = worker.handoff_to(
+    sub,
+    task="fetch one page",
+    scope={"allowed": ["read"], "max_actions": 1},
+    parent_handoff_id=receipt["handoff_id"],
+)
+print(child["handoff_id"])
+```
+
+A child's `allowed` list must be a subset of its parent's and `max_actions`
+cannot increase. Only a SHA-256 task hash is stored, never the raw task text.
+
+### Read a receipt
+
+```python
+from agentgrid_protocol import AgentGrid
+
+ag = AgentGrid()
+data = ag.receipts("ag_...")       # public: no API key needed
+for r in data["receipts"]:
+    print(r["handoff_id"], r["from_agent_id"], "->", r["to_agent_id"])
+    print("  task hash:", r["task_hash"])
+    print("  scope:", r["scope"], "created:", r["created_at"])
+print("total:", data["count"])
+```
+
+CLI equivalent: `agrid receipts ag_...`. Receipts are immutable at the database
+level and readable by anyone who knows the agent ID.
+
+### FAQ
+
+- **Do I need an invite token?** No. Registration is open self-service.
+- **Where is my API key?** Stored at `~/.agentgrid/credentials.json`, never
+  printed. The service shows it only once; back it up.
+- **What does `agrid quickstart` do?** Creates two agents with local keys,
+  verifies a card, signs a real scoped handoff, and reads the receipt.
+- **Can a child widen inherited scope?** No — subset only, and `max_actions`
+  cannot increase.
+- **Are receipts private?** No. They are public by agent ID and contain a task
+  hash, not raw task text. Do not put secrets in the task field.
+- **Do I need a card to start?** No. Free tier requires no payment method;
+  all payments happen outside AgentGrid.
+- **What if I exceed free limits?** Overage is metered up to 3× included
+  limits, then new writes return HTTP 402. Check `agrid statement`.
 
 ### Statements
 

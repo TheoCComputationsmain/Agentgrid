@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 from typing import Optional
 
 from .client import AgentGrid, AgentGridError, load_api_key, save_api_key
@@ -17,7 +18,7 @@ def _require_key(args: argparse.Namespace, *, prompt: bool = True) -> str:
     if key:
         return key
     if not prompt:
-        raise AgentGridError(0, "No API key. Run `agentgrid register` first.")
+        raise AgentGridError(0, "No API key. Run `agrid register` first.")
     entered = getpass.getpass("AgentGrid API key: ").strip()
     if not entered:
         raise AgentGridError(0, "No API key entered.")
@@ -33,6 +34,17 @@ def cmd_register(args: argparse.Namespace) -> int:
     print("Registered client: " + str(result["client_id"]) + " (tier: " + str(result["tier"]) + ")")
     print("API key stored at " + str(path) + " (not displayed).")
     print("Save a backup of that key now; the service shows it only once.")
+    print()
+    print("Next - three steps to your first signed handoff:")
+    print("  1. agrid quickstart")
+    print("     Two agents, a verified card, a signed handoff, and its receipt.")
+    print("  2. agrid card <agent_id>")
+    print("     Offline signature check for any public card (ID from step 1).")
+    print("  3. agrid receipts <agent_id>")
+    print("     Read the immutable receipts (worker ID from step 1).")
+    print()
+    print("Guide: " + client.base_url + "/guide")
+    print("API:   " + client.base_url + "/docs")
     return 0
 
 
@@ -102,6 +114,26 @@ def cmd_card(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_receipts(args: argparse.Namespace) -> int:
+    _require_key(args)
+    data = _client(args).receipts(args.agent_id)
+    items = data.get("receipts", [])
+    print("Agent: " + str(args.agent_id) + " / receipts: " + str(data.get("count", len(items))))
+    for receipt in items:
+        print(
+            "- "
+            + str(receipt["handoff_id"])
+            + "  "
+            + str(receipt["from_agent_id"])
+            + " -> "
+            + str(receipt["to_agent_id"])
+        )
+        print("  task_hash: " + str(receipt["task_hash"]))
+        print("  scope: " + json.dumps(receipt.get("scope", {}), sort_keys=True))
+        print("  created: " + str(receipt["created_at"]))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agrid", description="AgentGrid SDK command line")
     parser.add_argument(
@@ -132,6 +164,10 @@ def build_parser() -> argparse.ArgumentParser:
     card = sub.add_parser("card", help="verify a public Agent Card")
     card.add_argument("agent_id")
     card.set_defaults(func=cmd_card)
+
+    receipts = sub.add_parser("receipts", help="read immutable receipts for an agent")
+    receipts.add_argument("agent_id")
+    receipts.set_defaults(func=cmd_receipts)
     return parser
 
 

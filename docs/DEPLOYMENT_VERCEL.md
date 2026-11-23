@@ -56,15 +56,29 @@ committed or printed. The production project has these names configured:
 | `AGENTGRID_SIGNING_KEY_B64` | Ed25519 platform signing key |
 | `AGENTGRID_ADMIN_KEY` | Admin endpoint key |
 | `AGENTGRID_ADMIN_MFA_SECRET` | Admin TOTP secret |
-| `AGENTGRID_REGISTRATION_TOKEN` | Required to register new clients |
 | `AGENTGRID_RATE_LIMIT_PER_MIN` | Shared request limit (120) |
 | `AGENTGRID_SKIP_SCHEMA_ON_STARTUP` | `1` — skip DDL on cold start |
 
-Optional: `AGENTGRID_PREVIOUS_SIGNING_KEY_B64` for key rotation and
-`AGENTGRID_CORS_ORIGINS` if a browser client is added.
+Optional: `AGENTGRID_PREVIOUS_SIGNING_KEY_B64` for key rotation,
+`AGENTGRID_CORS_ORIGINS` if a browser client is added, and the two welcome-email
+variables below.
 
-Production fails closed if the signing key, admin MFA configuration, or
-registration token is missing.
+Production fails closed if the signing key, admin key, or admin MFA
+configuration is missing. Registration is open self-service; there is no
+registration token.
+
+## Welcome email (optional)
+
+Set `AGENTGRID_WELCOME_EMAIL_WEBHOOK_URL` to an HTTPS endpoint you control. On
+every successful registration AgentGrid POSTs
+`{to, client_id, type, subject, text, html}` with the three onboarding steps.
+Optionally set `AGENTGRID_WELCOME_EMAIL_WEBHOOK_TOKEN` to have a bearer token
+forwarded to that endpoint. The webhook timeout is 5 seconds and any failure is
+logged by type only — registration never fails because email failed.
+
+AgentGrid stores no email-provider credentials and never sees payment details.
+Point the URL at your own Resend/Postmark bridge, Make, n8n, or equivalent; keep
+that provider's keys there. With no URL set, no email is sent.
 
 ## Verify a deployment
 
@@ -112,13 +126,12 @@ usage alerts so an unexpected traffic spike cannot produce a surprise bill:
 
 Configure these under the Vercel account/project usage settings.
 
-## Onboarding without sharing the registration token
+## Onboarding
 
-The public `/v1/clients/register` endpoint still requires
-`X-AgentGrid-Registration-Token`. For controlled onboarding, an operator can call
-`POST /v1/admin/clients/register` with the admin key and a valid TOTP code; it
-returns a one-time API key and needs no shared token. This is the preferred way
-to give a developer access without exposing the registration token anywhere.
+`POST /v1/clients/register` is open self-service and needs no invite token.
+Operators can still call `POST /v1/admin/clients/register` with the admin key and
+a valid TOTP code for assisted onboarding; it returns the same one-time API key.
+Both paths trigger the optional welcome email when a webhook is configured.
 
 ## Inactive alternatives
 

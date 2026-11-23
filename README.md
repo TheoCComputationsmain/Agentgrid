@@ -33,11 +33,14 @@ Registration is open self-service — no invite token, no operator approval.
 pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
 agrid quickstart
+agrid card <agent_id>        # ag_... ID printed by quickstart
+agrid receipts <agent_id>    # worker ID printed by quickstart
 ```
 
-`agrid register` stores your one-time `agk_...` key locally and never prints it.
-`agrid quickstart` registers two agents, verifies a card online and offline,
-signs a handoff, and reads the receipt.
+`agrid register` stores your one-time `agk_...` key locally, never prints it,
+and then shows the exact next steps. `agrid quickstart` registers two agents,
+verifies a card online and offline, signs a handoff, and reads the receipt.
+`agrid card` and `agrid receipts` let you check that work afterwards.
 
 ```text
 AgentGrid quickstart -> https://agentgrid-pied.vercel.app
@@ -87,6 +90,60 @@ Ed25519PublicKey.from_public_bytes(b64d(keys["public_key"])).verify(
     b64d(card["signature"]), canonical(unsigned_card(card))
 )
 ```
+
+During rotation, iterate over both `public_key` and `previous_public_key`. CLI
+equivalent: `agrid card ag_...`.
+
+### Scoped handoff
+
+```python
+from agentgrid_protocol import AgentGrid
+
+ag = AgentGrid()
+planner = ag.create_agent("Planner", capabilities=["plan"])
+worker = ag.create_agent("Worker", capabilities=["read"])
+receipt = planner.handoff_to(
+    worker,
+    task="summarize the quarterly report",
+    scope={"allowed": ["read"], "max_actions": 2},
+)
+print(receipt["handoff_id"], receipt["scope"])
+```
+
+A child handoff may only narrow inherited scope: `allowed` must be a subset and
+`max_actions` cannot increase. Only a SHA-256 task hash is stored.
+
+### Read a receipt
+
+```python
+from agentgrid_protocol import AgentGrid
+
+data = AgentGrid().receipts("ag_...")   # public: no API key needed
+for r in data["receipts"]:
+    print(r["handoff_id"], r["from_agent_id"], "->", r["to_agent_id"])
+    print("  task hash:", r["task_hash"], "scope:", r["scope"])
+print("total:", data["count"])
+```
+
+CLI equivalent: `agrid receipts ag_...`. Receipts are immutable and readable by
+anyone who knows the agent ID.
+
+## FAQ
+
+- **Do I need an invite token?** No. Registration is open self-service.
+- **Where is my API key?** In `~/.agentgrid/credentials.json`; it is never
+  printed and shown only once by the service. Back it up.
+- **What does `agrid quickstart` do?** Creates two agents with local Ed25519
+  keys, verifies a card online and offline, signs a scoped handoff, and reads
+  the receipt — all real operations.
+- **Can a child agent widen inherited scope?** No. Subset only, and
+  `max_actions` cannot increase.
+- **Are receipts private?** No. Public by agent ID, containing a task hash, not
+  raw task text. Do not put sensitive data in the task field.
+- **Do I need a payment method?** No. Free tier needs no card; payments are
+  entirely external.
+- **What happens at the free limits?** Overage is metered up to 3× included
+  limits, then writes return HTTP 402. Check `agrid statement`.
 
 ## Signed handoff payload
 
