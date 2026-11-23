@@ -96,6 +96,28 @@ OPERATOR_TEST_PREFIXES = (
     "emailcheck_",
     "human_",
 )
+# Small, deliberately conservative list. A match is a signal for the operator
+# console, never a block: real users can own addresses on these domains.
+DISPOSABLE_EMAIL_DOMAINS = frozenset(
+    {
+        "10minutemail.com",
+        "dispostable.com",
+        "fakeinbox.com",
+        "getairmail.com",
+        "guerrillamail.com",
+        "mailinator.com",
+        "mailnull.com",
+        "mintemail.com",
+        "mytrashmail.com",
+        "sharklasers.com",
+        "spam4.me",
+        "temp-mail.org",
+        "tempmail.com",
+        "throwawaymail.com",
+        "trashmail.com",
+        "yopmail.com",
+    }
+)
 TIER_PRICES_USD = {
     "free": 0,
     "plus": 20,
@@ -265,6 +287,19 @@ def _parse_iso(value: Optional[str]) -> Optional[datetime]:
     if not value:
         return None
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _mask_email(email: Optional[str]) -> Optional[str]:
+    if not email or "@" not in email:
+        return email
+    local, domain = email.rsplit("@", 1)
+    return f"{(local[0] if local else '')}***@{domain}"
+
+
+def _email_is_disposable(email: Optional[str]) -> bool:
+    if not email or "@" not in email:
+        return False
+    return email.rsplit("@", 1)[1].lower() in DISPOSABLE_EMAIL_DOMAINS
 
 
 def _valid_recent_timestamp(value: str) -> bool:
@@ -777,17 +812,78 @@ async def verify_api_key(
     return client.client_id
 
 
+def _check_admin_credentials(admin_key: Optional[str], mfa: Optional[str]) -> None:
+    if not ADMIN_KEY or not admin_key or not hmac.compare_digest(admin_key, ADMIN_KEY):
+        raise HTTPException(status_code=401, detail="Valid X-AgentGrid-Admin-Key header required.")
+    if ADMIN_MFA_SECRET:
+        if not mfa or not _verify_totp(ADMIN_MFA_SECRET, mfa):
+            raise HTTPException(status_code=401, detail="Valid X-AgentGrid-Admin-MFA TOTP code required.")
+    elif APP_ENV == "production":
+        raise HTTPException(status_code=503, detail="Admin MFA is not configured; set AGENTGRID_ADMIN_MFA_SECRET.")
+
+
 async def verify_admin(
     x_agentgrid_admin_key: Optional[str] = Header(None, alias="X-AgentGrid-Admin-Key"),
     x_agentgrid_admin_mfa: Optional[str] = Header(None, alias="X-AgentGrid-Admin-MFA"),
 ) -> bool:
-    if not ADMIN_KEY or not x_agentgrid_admin_key or not hmac.compare_digest(x_agentgrid_admin_key, ADMIN_KEY):
-        raise HTTPException(status_code=401, detail="Valid X-AgentGrid-Admin-Key header required.")
-    if ADMIN_MFA_SECRET:
-        if not x_agentgrid_admin_mfa or not _verify_totp(ADMIN_MFA_SECRET, x_agentgrid_admin_mfa):
-            raise HTTPException(status_code=401, detail="Valid X-AgentGrid-Admin-MFA TOTP code required.")
-    elif APP_ENV == "production":
-        raise HTTPException(status_code=503, detail="Admin MFA is not configured; set AGENTGRID_ADMIN_MFA_SECRET.")
+    _check_admin_credentials(x_agentgrid_admin_key, x_agentgrid_admin_mfa)
+    return True
+
+
+OPS_SESSION_COOKIE = "ag_ops"
+OPS_SESSION_TTL_SECONDS = 12 * 60 * 60
+
+
+def _ops_secret() -> bytes:
+    return (
+        os.environ.get("AGENTGRID_SIGNING_KEY_B64")
+        or ADMIN_KEY
+        or "agentgrid-development"
+    ).encode("utf-8")
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _b64url_decode(value: str) -> bytes:
+    return base64.urlsafe_b64decode(value + "=" * (-len(value) % 4))
+
+
+def _make_ops_session_token() -> str:
+    payload = {"scope": "ops:read", "exp": int(time.time()) + OPS_SESSION_TTL_SECONDS}
+    body = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signature = _b64url_encode(
+        hmac.new(_ops_secret(), body.encode("utf-8"), hashlib.sha256).digest()
+    )
+    return f"{body}.{signature}"
+
+
+def _ops_session_valid(token: Optional[str]) -> bool:
+    if not token or "." not in token:
+        return False
+    body, supplied = token.split(".", 1)
+    expected = _b64url_encode(
+        hmac.new(_ops_secret(), body.encode("utf-8"), hashlib.sha256).digest()
+    )
+    if not hmac.compare_digest(supplied, expected):
+        return False
+    try:
+        payload = json.loads(_b64url_decode(body))
+        return payload.get("scope") == "ops:read" and int(payload.get("exp", 0)) > int(time.time())
+    except (ValueError, TypeError, binascii.Error):
+        return False
+
+
+async def verify_ops_or_admin(
+    request: Request,
+    x_agentgrid_admin_key: Optional[str] = Header(None, alias="X-AgentGrid-Admin-Key"),
+    x_agentgrid_admin_mfa: Optional[str] = Header(None, alias="X-AgentGrid-Admin-MFA"),
+) -> bool:
+    """Allow the read-only /ops cookie or the existing admin key + TOTP headers."""
+    if _ops_session_valid(request.cookies.get(OPS_SESSION_COOKIE)):
+        return True
+    _check_admin_credentials(x_agentgrid_admin_key, x_agentgrid_admin_mfa)
     return True
 
 
@@ -954,6 +1050,11 @@ class GrantAccessRequest(BaseModel):
 class RecordStatementPaymentRequest(BaseModel):
     cashfree_order_id: str = Field(..., min_length=3, max_length=128)
     cashfree_payment_id: Optional[str] = Field(None, max_length=128)
+
+
+class AdminSessionRequest(BaseModel):
+    admin_key: str = Field(..., min_length=1)
+    mfa: str = Field(..., min_length=1, max_length=6)
 
 
 # ---------------------------------------------------------------------------
@@ -1255,9 +1356,312 @@ fix a mistyped ID. To change it later, call
 </body></html>"""
 
 
+OPS_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AgentGrid · Operator Live</title>
+<style>
+:root{color-scheme:dark;--bg:#080d1a;--panel:#111a30;--line:#223056;--text:#eaf0ff;--muted:#9db0d0;--accent:#7ee7c7;--warn:#ffcc66;--bad:#ff7b7b}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+body{margin:0;background:radial-gradient(900px 500px at 15% -10%,#16305a 0%,transparent 60%),var(--bg);color:var(--text);font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+a{color:var(--accent)}
+.wrap{max-width:1140px;margin:0 auto;padding:28px 20px 64px}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;flex-wrap:wrap}
+.brand{font-weight:800;font-size:20px;letter-spacing:.2px}
+.brand span{color:var(--accent)}
+.kicker{color:var(--muted);font-size:13px;margin-top:3px}
+.pill{border:1px solid var(--line);border-radius:999px;padding:6px 12px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.pill.on{color:var(--accent);border-color:#2c6c5b;background:#0f2b26}
+.pill.off{color:var(--muted);background:#121a30}
+.card{background:linear-gradient(180deg,#121c34,#0e1629);border:1px solid var(--line);border-radius:14px;padding:20px;margin-top:18px;box-shadow:0 16px 40px rgba(0,0,0,.22)}
+h1{font-size:26px;margin:0 0 8px}
+h2{font-size:18px;margin:0 0 6px}
+.muted{color:var(--muted)}
+.grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:14px;margin-top:18px}
+label{display:block;font-size:13px;color:var(--muted);font-weight:600}
+input[type=password],input[type=text]{width:100%;margin-top:7px;padding:11px 12px;border-radius:9px;border:1px solid var(--line);background:#0a1122;color:var(--text);font:inherit}
+input[type=password]:focus,input[type=text]:focus{outline:2px solid #2c6c5b;outline-offset:1px}
+.row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:16px}
+.row.small{font-size:13px;margin-top:0}
+button{border:1px solid var(--line);background:#16223e;color:var(--text);border-radius:9px;padding:9px 13px;font:inherit;font-weight:650;cursor:pointer}
+button:hover{border-color:#3a5588}
+button.primary{background:var(--accent);color:#062018;border-color:var(--accent)}
+button.ghost{background:transparent}
+.err{color:var(--bad);font-size:13px}
+.bar{display:flex;justify-content:space-between;align-items:center;gap:16px;flex-wrap:wrap;padding:14px 18px}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--accent);margin-right:7px;box-shadow:0 0 0 4px rgba(126,231,199,.12)}
+.dot.paused{background:var(--warn);box-shadow:0 0 0 4px rgba(255,204,102,.12)}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px;margin-top:18px}
+.stat{background:linear-gradient(180deg,#121c34,#0e1629);border:1px solid var(--line);border-radius:13px;padding:16px}
+.stat-label{color:var(--muted);font-size:12px;text-transform:uppercase;letter-spacing:.05em;font-weight:700}
+.stat-value{font-size:28px;font-weight:800;margin:7px 0 2px;word-break:break-word}
+.stat-hint{color:var(--muted);font-size:12px}
+.legend{display:flex;gap:8px;flex-wrap:wrap;margin:14px 0}
+.badge{display:inline-block;border-radius:999px;padding:4px 9px;font-size:12px;font-weight:700;white-space:nowrap}
+.badge.ok{background:#0f2b26;color:var(--accent);border:1px solid #2c6c5b}
+.badge.warn{background:#332812;color:var(--warn);border:1px solid #6b5524}
+.badge.bad{background:#33161c;color:var(--bad);border:1px solid #6b2c36}
+.check{display:flex;align-items:center;gap:8px;color:var(--muted);font-weight:500;margin-bottom:12px}
+.check input{width:auto;margin:0}
+table{width:100%;border-collapse:collapse;font-size:13px;min-width:860px}
+th,td{text-align:left;padding:10px 9px;border-bottom:1px solid var(--line);vertical-align:middle}
+th{color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+tbody tr:hover{background:#121c34}
+code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#cfe0ff}
+footer{color:var(--muted);font-size:12px;margin-top:22px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div>
+      <div class="brand">TheoC Computations <span>&middot; AgentGrid</span></div>
+      <div class="kicker">Operator live view &middot; read-only &middot; no secrets in page source</div>
+    </div>
+    <div id="status" class="pill off">Locked</div>
+  </div>
+
+  <section id="login" class="card">
+    <h1>Live operator console</h1>
+    <p class="muted">Sign in with your admin key and current authenticator code. They are exchanged for a 12-hour, read-only browser session. Credentials are cleared from the form immediately and never appear in this page source.</p>
+    <div class="grid2">
+      <label>Admin key<input id="admin-key" type="password" autocomplete="off" placeholder="X-AgentGrid-Admin-Key value"></label>
+      <label>Current TOTP<input id="mfa" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6 digits"></label>
+    </div>
+    <div class="row">
+      <button id="unlock" class="primary">Unlock live view</button>
+      <span id="login-error" class="err"></span>
+    </div>
+  </section>
+
+  <main id="dashboard" hidden>
+    <section class="card bar">
+      <div><span id="live-dot" class="dot"></span><strong id="live-text">Live &middot; auto-refresh 30s</strong></div>
+      <div class="row small">
+        <span id="updated" class="muted">Not loaded yet</span>
+        <button id="refresh">Refresh now</button>
+        <button id="toggle">Pause</button>
+        <button id="signout" class="ghost">Sign out</button>
+      </div>
+    </section>
+
+    <section class="cards" id="cards"></section>
+
+    <section class="card">
+      <h2>Signup authenticity signals</h2>
+      <p class="muted">Email confirmation proves inbox control. Real usage &mdash; creating an agent or signing a handoff &mdash; is the stronger signal. No email-only system can prove personhood, so these are signals, not verdicts.</p>
+      <div class="legend">
+        <span class="badge ok">Active user</span>
+        <span class="badge warn">Verified &middot; no activity yet</span>
+        <span class="badge warn">Pending verification</span>
+        <span class="badge bad">Disposable-looking email</span>
+        <span class="badge bad">Legacy &middot; no email</span>
+      </div>
+      <label class="check"><input id="include-tests" type="checkbox"> Include operator/test accounts</label>
+      <div style="overflow:auto">
+        <table>
+          <thead><tr><th>Client ID</th><th>Created</th><th>Email</th><th>Verified</th><th>Agents</th><th>Handoffs</th><th>Last activity</th><th>Signal</th></tr></thead>
+          <tbody id="rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer>Source of truth: <code>/v1/admin/stats</code> and <code>/v1/admin/clients</code>. Public totals exclude operator/test prefixes.</footer>
+  </main>
+</div>
+<script>
+const el = (id) => document.getElementById(id);
+const state = {stats:null, clients:[], timer:null, paused:false, includeTests:false};
+
+function setStatus(text, ok) {
+  const s = el('status');
+  s.textContent = text;
+  s.className = 'pill ' + (ok ? 'on' : 'off');
+}
+
+function showLogin(message) {
+  el('dashboard').hidden = true;
+  el('login').hidden = false;
+  setStatus('Locked', false);
+  if (message) el('login-error').textContent = message;
+}
+
+function showDashboard() {
+  el('login').hidden = true;
+  el('dashboard').hidden = false;
+  el('login-error').textContent = '';
+  setStatus('Unlocked', true);
+}
+
+function fmt(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
+}
+
+async function call(path, options) {
+  const res = await fetch(path, Object.assign({credentials:'include'}, options || {}));
+  if (res.status === 401) {
+    showLogin('Session expired. Sign in again.');
+    throw new Error('unauthorized');
+  }
+  if (!res.ok) throw new Error((await res.text()).slice(0, 200));
+  return res.json();
+}
+
+function statCard(label, value, hint) {
+  const box = document.createElement('div');
+  box.className = 'stat';
+  const l = document.createElement('div'); l.className = 'stat-label'; l.textContent = label;
+  const v = document.createElement('div'); v.className = 'stat-value'; v.textContent = value;
+  const h = document.createElement('div'); h.className = 'stat-hint'; h.textContent = hint || '';
+  box.append(l, v, h);
+  return box;
+}
+
+function signalBadge(signal) {
+  const badge = document.createElement('span');
+  const map = {
+    active_user: ['Active user', 'ok'],
+    verified_inactive: ['Verified · no activity yet', 'warn'],
+    pending_verification: ['Pending verification', 'warn'],
+    disposable_email: ['Disposable-looking email', 'bad'],
+    legacy_uncontactable: ['Legacy · no email', 'bad']
+  };
+  const item = map[signal] || [signal || 'Unknown', 'bad'];
+  badge.className = 'badge ' + item[1];
+  badge.textContent = item[0];
+  return badge;
+}
+
+function renderCards() {
+  const s = state.stats;
+  if (!s) return;
+  const p = s.public_users;
+  el('cards').replaceChildren(
+    statCard('Verified public users', p.total, 'Confirmed inbox control'),
+    statCard('Active public users', p.active_users, 'Created an agent or handoff'),
+    statCard('Pending verification', s.unverified_signups, 'No API key issued yet'),
+    statCard('Agents', p.agents, 'Owned by public users'),
+    statCard('Handoffs', p.handoffs, 'Signed by public users'),
+    statCard('Paid active', p.paid_active, 'Non-free tier, unexpired'),
+    statCard('Newest signup', fmt(p.newest_signup), 'Most recent verified public client'),
+    statCard('Test accounts excluded', s.test_accounts_excluded, 'Operator prefixes')
+  );
+  el('updated').textContent = 'Updated ' + new Date(s.generated_at).toLocaleTimeString();
+}
+
+function renderTable() {
+  const body = el('rows');
+  body.replaceChildren();
+  const rows = state.clients.filter((c) => state.includeTests || !c.is_test_account);
+  for (const c of rows) {
+    const tr = document.createElement('tr');
+    const id = document.createElement('td');
+    id.textContent = c.client_id.length > 18 ? c.client_id.slice(0, 16) + '…' : c.client_id;
+    id.title = c.client_id;
+    const created = document.createElement('td'); created.textContent = fmt(c.created_at);
+    const email = document.createElement('td'); email.textContent = c.email || '—';
+    const verified = document.createElement('td'); verified.textContent = c.email_verified ? 'Verified' : 'Pending';
+    const agents = document.createElement('td'); agents.textContent = c.agent_count;
+    const handoffs = document.createElement('td'); handoffs.textContent = c.handoff_count;
+    const last = document.createElement('td'); last.textContent = fmt(c.last_activity_at);
+    const signal = document.createElement('td'); signal.append(signalBadge(c.signal));
+    tr.append(id, created, email, verified, agents, handoffs, last, signal);
+    body.append(tr);
+  }
+  if (!rows.length) {
+    const tr = document.createElement('tr');
+    const td = document.createElement('td');
+    td.colSpan = 8; td.className = 'muted'; td.textContent = 'No signups match this view.';
+    tr.append(td); body.append(tr);
+  }
+}
+
+async function load() {
+  try {
+    const results = await Promise.all([
+      call('/v1/admin/stats'),
+      call('/v1/admin/clients?limit=200')
+    ]);
+    state.stats = results[0];
+    state.clients = results[1].clients || [];
+    renderCards();
+    renderTable();
+    el('live-text').textContent = state.paused ? 'Paused' : 'Live · auto-refresh 30s';
+    el('live-dot').className = 'dot' + (state.paused ? ' paused' : '');
+  } catch (e) {
+    if (e.message !== 'unauthorized') el('updated').textContent = 'Refresh failed: ' + e.message;
+  }
+}
+
+function schedule() {
+  clearInterval(state.timer);
+  if (!state.paused) state.timer = setInterval(load, 30000);
+}
+
+el('unlock').onclick = async () => {
+  el('login-error').textContent = '';
+  try {
+    const res = await fetch('/v1/admin/session', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({admin_key: el('admin-key').value, mfa: el('mfa').value})
+    });
+    if (!res.ok) {
+      let message = 'Sign-in failed';
+      try { message = (await res.json()).detail || message; } catch (e) {}
+      el('login-error').textContent = message;
+      return;
+    }
+    el('admin-key').value = '';
+    el('mfa').value = '';
+    showDashboard();
+    await load();
+    schedule();
+  } catch (e) {
+    el('login-error').textContent = 'Network error';
+  }
+};
+
+el('refresh').onclick = load;
+el('toggle').onclick = () => {
+  state.paused = !state.paused;
+  el('toggle').textContent = state.paused ? 'Resume' : 'Pause';
+  schedule();
+  load();
+};
+el('include-tests').onchange = (e) => {
+  state.includeTests = e.target.checked;
+  renderTable();
+};
+el('signout').onclick = async () => {
+  await fetch('/v1/admin/session/logout', {method: 'POST', credentials: 'include'});
+  clearInterval(state.timer);
+  state.stats = null;
+  state.clients = [];
+  showLogin('Signed out.');
+};
+
+fetch('/v1/admin/stats', {credentials: 'include'})
+  .then((res) => { if (res.ok) { showDashboard(); load(); schedule(); } })
+  .catch(() => {});
+</script>
+</body></html>"""
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard() -> str:
     return LANDING_HTML
+
+
+@app.get("/ops", response_class=HTMLResponse)
+async def operator_live_page() -> str:
+    return OPS_HTML
 
 
 @app.get("/guide", response_class=HTMLResponse)
@@ -2115,18 +2519,81 @@ async def get_statement(
     )
 
 
+@app.post("/v1/admin/session")
+async def create_ops_session(payload: AdminSessionRequest) -> JSONResponse:
+    """Exchange admin key + TOTP for a short-lived, read-only /ops cookie."""
+    _check_admin_credentials(payload.admin_key, payload.mfa)
+    response = JSONResponse(
+        {"status": "ok", "scope": "ops:read", "expires_in": OPS_SESSION_TTL_SECONDS}
+    )
+    response.set_cookie(
+        OPS_SESSION_COOKIE,
+        _make_ops_session_token(),
+        max_age=OPS_SESSION_TTL_SECONDS,
+        httponly=True,
+        secure=APP_ENV == "production",
+        samesite="strict",
+        path="/",
+    )
+    return response
+
+
+@app.post("/v1/admin/session/logout")
+async def delete_ops_session() -> JSONResponse:
+    response = JSONResponse({"status": "ok"})
+    response.delete_cookie(OPS_SESSION_COOKIE, path="/", samesite="strict")
+    return response
+
+
+def _signup_signal(client: ClientModel, agent_count: int, handoff_count: int) -> str:
+    if not client.email_verified:
+        return "pending_verification"
+    if not client.email:
+        return "legacy_uncontactable"
+    if _email_is_disposable(client.email):
+        return "disposable_email"
+    if agent_count or handoff_count:
+        return "active_user"
+    return "verified_inactive"
+
+
 @app.get("/v1/admin/clients")
 async def admin_list_clients(
     limit: int = 50,
-    authorized: bool = Depends(verify_admin),
+    authorized: bool = Depends(verify_ops_or_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Read-only overview of recent clients for operator payment checks."""
+    """Read-only overview of recent clients for operator checks and /ops."""
     bounded = max(1, min(limit, 200))
     result = await db.execute(
         select(ClientModel).order_by(ClientModel.created_at.desc()).limit(bounded)
     )
     clients = result.scalars().all()
+    ids = [client.client_id for client in clients]
+
+    agent_rows = await db.execute(
+        select(AgentModel.client_id, func.count(AgentModel.agent_id), func.max(AgentModel.created_at))
+        .where(AgentModel.client_id.in_(ids))
+        .group_by(AgentModel.client_id)
+    )
+    agent_stats = {
+        str(client_id): {"count": int(count), "last": last}
+        for client_id, count, last in agent_rows.all()
+    }
+    handoff_rows = await db.execute(
+        select(
+            HandoffModel.client_id,
+            func.count(HandoffModel.handoff_id),
+            func.max(HandoffModel.created_at),
+        )
+        .where(HandoffModel.client_id.in_(ids))
+        .group_by(HandoffModel.client_id)
+    )
+    handoff_stats = {
+        str(client_id): {"count": int(count), "last": last}
+        for client_id, count, last in handoff_rows.all()
+    }
+
     today = datetime.now(timezone.utc).date()
     items: list[dict[str, Any]] = []
     for client in clients:
@@ -2140,6 +2607,11 @@ async def admin_list_clients(
         )
         statement = stored.scalar_one_or_none()
         closed = today >= end
+        a = agent_stats.get(client.client_id, {"count": 0, "last": None})
+        h = handoff_stats.get(client.client_id, {"count": 0, "last": None})
+        last_activity = max(
+            [value for value in (a["last"], h["last"]) if value], default=None
+        )
         items.append(
             {
                 "client_id": client.client_id,
@@ -2155,6 +2627,15 @@ async def admin_list_clients(
                 ),
                 "cashfree_order_id": statement.cashfree_order_id if statement else None,
                 "created_at": client.created_at,
+                "email": _mask_email(client.email),
+                "email_verified": bool(client.email_verified),
+                "disposable_email": _email_is_disposable(client.email),
+                "verification_attempts": int(client.verification_attempts or 0),
+                "agent_count": a["count"],
+                "handoff_count": h["count"],
+                "last_activity_at": last_activity,
+                "is_test_account": client.client_id.startswith(OPERATOR_TEST_PREFIXES),
+                "signal": _signup_signal(client, a["count"], h["count"]),
             }
         )
     return {"count": len(items), "clients": items}
@@ -2163,7 +2644,7 @@ async def admin_list_clients(
 @app.get("/v1/admin/stats")
 async def admin_stats(
     limit: int = 5_000,
-    authorized: bool = Depends(verify_admin),
+    authorized: bool = Depends(verify_ops_or_admin),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """Aggregate tier and usage counts for a quick operator pulse check."""

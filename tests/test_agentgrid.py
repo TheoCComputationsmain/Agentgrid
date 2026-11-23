@@ -34,6 +34,14 @@ def api():
         yield client
 
 
+@pytest.fixture(autouse=True)
+def _fresh_rate_bucket():
+    """Keep the shared 120/min test bucket from leaking between tests."""
+    main._rate_bucket.clear()
+    yield
+    main._rate_bucket.clear()
+
+
 def _b64e(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
@@ -1141,6 +1149,66 @@ def test_admin_list_clients_returns_overview(api):
     assert row["tier"] == "free"
     assert row["payment_status"] == "current"
     assert row["invoice_id"].startswith("inv_")
+    assert row["email_verified"] is True
+    assert row["disposable_email"] is False
+    assert row["email"].endswith("@example.test")
+    assert "***@" in row["email"]
+    assert row["agent_count"] == 0
+    assert row["handoff_count"] == 0
+    assert row["last_activity_at"] is None
+    assert row["is_test_account"] is False
+    assert row["signal"] == "verified_inactive"
+
+
+def test_ops_live_page_and_read_only_session(api):
+    page = api.get("/ops")
+    assert page.status_code == 200, page.text
+    assert "Live operator console" in page.text
+    assert "TheoC Computations" in page.text
+    assert "Signup authenticity signals" in page.text
+    assert "auto-refresh" in page.text
+
+    assert api.get("/v1/admin/stats").status_code == 401
+    denied = api.post(
+        "/v1/admin/session", json={"admin_key": "wrong", "mfa": _totp()}
+    )
+    assert denied.status_code == 401
+
+    login = api.post(
+        "/v1/admin/session",
+        json={"admin_key": "test-admin-key", "mfa": _totp()},
+    )
+    assert login.status_code == 200, login.text
+    assert login.json()["scope"] == "ops:read"
+    assert api.get("/v1/admin/stats").status_code == 200
+    assert api.get("/v1/admin/clients?limit=1").status_code == 200
+
+    mutation = api.post(
+        "/v1/admin/clients/cli_missing/grant-access",
+        json={
+            "tier": "plus",
+            "cashfree_order_id": "ord_ops_test",
+            "cashfree_payment_id": "pay_ops_test",
+        },
+    )
+    assert mutation.status_code == 401
+
+    assert api.post("/v1/admin/session/logout").status_code == 200
+    assert api.get("/v1/admin/stats").status_code == 401
+
+
+def test_admin_flags_disposable_email_without_blocking_signup(api):
+    registered = _register(api, email=f"bot{uuid.uuid4().hex[:6]}@mailinator.com")
+    headers = {"X-AgentGrid-Admin-Key": "test-admin-key", "X-AgentGrid-Admin-MFA": _totp()}
+    response = api.get("/v1/admin/clients?limit=5", headers=headers)
+    assert response.status_code == 200, response.text
+    row = next(
+        item for item in response.json()["clients"]
+        if item["client_id"] == registered["client_id"]
+    )
+    assert row["email_verified"] is True
+    assert row["disposable_email"] is True
+    assert row["signal"] == "disposable_email"
 
 
 def test_guide_has_three_step_quickstart_recipes_and_faq(api):
