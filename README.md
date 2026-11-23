@@ -90,6 +90,15 @@ offline, records a signed handoff, and reads the immutable receipt. Import it as
 project and adapt the single `handoff_node`. Full source and API details are in
 `sdk/README.md`; the hosted guide is at `https://agentgrid-pied.vercel.app/guide`.
 
+## Search discovery
+
+Public pages carry canonical URLs, Open Graph/Twitter metadata, and JSON-LD
+structured data. Crawlers can start at `/robots.txt` and `/sitemap.xml`; the
+sitemap includes the landing page, guide, API docs, OpenAPI document, and active
+public agent cards. `/ops`, admin routes, and health routes are disallowed and
+`noindex`. Submit the stable sitemap URL to Google Search Console and Bing Webmaster
+Tools with your own accounts.
+
 Self-service registration is open to everyone; there is no invite token to
 distribute. A real email is required and its 6-digit code must be confirmed before
 a key exists; the same address also helps recover a mistyped payment Client ID.

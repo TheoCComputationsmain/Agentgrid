@@ -109,6 +109,42 @@ def test_health_and_root(api):
     assert "AgentGrid" in api.get("/").text
 
 
+def test_public_search_discovery_endpoints(api):
+    base = main.PUBLIC_BASE_URL
+    robots = api.get("/robots.txt")
+    assert robots.status_code == 200
+    assert "Sitemap: " + base + "/sitemap.xml" in robots.text
+    assert "Disallow: /ops" in robots.text
+
+    sitemap = api.get("/sitemap.xml")
+    assert sitemap.status_code == 200
+    assert "<urlset" in sitemap.text
+    assert base + "/guide" in sitemap.text
+
+    registered = _register(api, email="seo@example.test")
+    agent = _create_agent(api, registered["api_key"], "Search Discovery Agent")
+    sitemap_after = api.get("/sitemap.xml")
+    assert "/a/" + agent["agent_id"] in sitemap_after.text
+
+    landing = api.get("/").text
+    assert '<link rel="canonical" href="' + base + '/">' in landing
+    assert "application/ld+json" in landing
+    assert "SoftwareApplication" in landing
+
+    guide = api.get("/guide").text
+    assert '<link rel="canonical" href="' + base + '/guide">' in guide
+    assert "TechArticle" in guide
+    assert "FAQPage" in guide
+
+    card = api.get("/a/" + agent["agent_id"]).text
+    assert '<link rel="canonical" href="' + base + "/a/" + agent["agent_id"] + '">' in card
+    assert "application/ld+json" in card
+
+    ops = api.get("/ops")
+    assert "noindex" in ops.text
+    assert ops.headers["x-robots-tag"] == "noindex, nofollow"
+
+
 def test_open_registration_and_api_key_auth(api):
     # Public self-service registration needs no invite token.
     unauthenticated = api.get("/v1/clients/me")

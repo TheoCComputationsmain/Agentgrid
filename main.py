@@ -22,7 +22,7 @@ import uuid
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
@@ -31,7 +31,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from welcome_email import send_verification_email, send_welcome_email
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import Boolean, Column, Integer, String, Text, func, text, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
@@ -44,6 +44,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agentgrid")
 
 APP_ENV = os.environ.get("AGENTGRID_APP_ENV", "development").lower()
+PUBLIC_BASE_URL = os.environ.get("AGENTGRID_PUBLIC_URL", "https://agentgrid-pied.vercel.app").rstrip("/")
 DATABASE_URL = (
     os.environ.get("AGENTGRID_DATABASE_URL")
     or os.environ.get("DATABASE_URL")
@@ -1092,10 +1093,89 @@ td,th{padding:9px 8px;border-bottom:1px solid #233056;text-align:left;vertical-a
 </style>
 """
 
+
+def _json_ld(payload: dict[str, Any]) -> str:
+    """Serialize structured data safely inside an HTML script tag."""
+    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).replace("<", "\\u003c")
+    return '<script type="application/ld+json">' + body + "</script>"
+
+
+def _seo_meta(
+    title: str,
+    description: str,
+    path: str,
+    *,
+    structured_data: Optional[dict[str, Any]] = None,
+    robots: str = "index, follow",
+) -> str:
+    """Shared canonical, social, and crawler metadata for public HTML pages."""
+    canonical = PUBLIC_BASE_URL + path
+    parts = [
+        '<meta name="viewport" content="width=device-width,initial-scale=1">',
+        f"<title>{html.escape(title)}</title>",
+        f'<meta name="description" content="{html.escape(description, quote=True)}">',
+        f'<meta name="robots" content="{html.escape(robots, quote=True)}">',
+        f'<link rel="canonical" href="{html.escape(canonical, quote=True)}">',
+        '<meta property="og:type" content="website">',
+        '<meta property="og:site_name" content="AgentGrid">',
+        f'<meta property="og:title" content="{html.escape(title, quote=True)}">',
+        f'<meta property="og:description" content="{html.escape(description, quote=True)}">',
+        f'<meta property="og:url" content="{html.escape(canonical, quote=True)}">',
+        '<meta name="twitter:card" content="summary">',
+        f'<meta name="twitter:title" content="{html.escape(title, quote=True)}">',
+        f'<meta name="twitter:description" content="{html.escape(description, quote=True)}">',
+    ]
+    if structured_data:
+        parts.append(_json_ld(structured_data))
+    return "\n".join(parts)
+
+
+LANDING_STRUCTURED_DATA: dict[str, Any] = {
+    "@context": "https://schema.org",
+    "@graph": [
+        {
+            "@type": "Organization",
+            "@id": PUBLIC_BASE_URL + "/#organization",
+            "name": "TheoC Computations",
+            "url": "https://github.com/TheoCComputationsmain",
+        },
+        {
+            "@type": "WebSite",
+            "@id": PUBLIC_BASE_URL + "/#website",
+            "url": PUBLIC_BASE_URL + "/",
+            "name": "AgentGrid",
+            "description": "Signed identity, discovery, and handoff receipts for AI agents.",
+            "inLanguage": "en",
+            "publisher": {"@id": PUBLIC_BASE_URL + "/#organization"},
+        },
+        {
+            "@type": "SoftwareApplication",
+            "@id": PUBLIC_BASE_URL + "/#software",
+            "name": "AgentGrid",
+            "applicationCategory": "DeveloperApplication",
+            "operatingSystem": "Web",
+            "url": PUBLIC_BASE_URL + "/",
+            "description": (
+                "Publish signed agent cards, verify them offline, and record scoped "
+                "handoffs with immutable receipts. Payments happen externally."
+            ),
+            "offers": {
+                "@type": "Offer",
+                "price": "0",
+                "priceCurrency": "USD",
+                "description": "Free tier. Paid tiers are collected outside AgentGrid.",
+            },
+        },
+    ],
+}
+
 LANDING_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>AgentGrid — verified agents</title>
-<meta name="description" content="Signed identity, discovery, and handoff receipts for AI agents.">
-""" + PUBLIC_STYLE + """</head><body>
+""" + _seo_meta(
+    "AgentGrid — signed identity and handoff receipts for AI agents",
+    "AgentGrid publishes signed agent cards, offline verification, scoped handoffs, and immutable receipts. Open self-service registration; no money inside the platform.",
+    "/",
+    structured_data=LANDING_STRUCTURED_DATA,
+) + PUBLIC_STYLE + """</head><body>
 <h1>AgentGrid</h1>
 <p class="muted">Signed identity, discovery and handoff receipts for AI agents.</p>
 <p><span class="tag">Portable signed cards</span> <span class="tag">Verified handoffs</span>
@@ -1151,9 +1231,118 @@ your statement is only for operator reconciliation.</div>
 <a href="/health/ready">Health</a></p>
 </body></html>"""
 
+GUIDE_STRUCTURED_DATA: dict[str, Any] = {
+    "@context": "https://schema.org",
+    "@graph": [
+        {
+            "@type": "BreadcrumbList",
+            "@id": PUBLIC_BASE_URL + "/guide#breadcrumb",
+            "itemListElement": [
+                {
+                    "@type": "ListItem",
+                    "position": 1,
+                    "name": "AgentGrid",
+                    "item": PUBLIC_BASE_URL + "/",
+                },
+                {
+                    "@type": "ListItem",
+                    "position": 2,
+                    "name": "Developer guide",
+                    "item": PUBLIC_BASE_URL + "/guide",
+                },
+            ],
+        },
+        {
+            "@type": "TechArticle",
+            "@id": PUBLIC_BASE_URL + "/guide#article",
+            "headline": "AgentGrid developer guide: signed cards, scoped handoffs, and receipts",
+            "description": (
+                "Copy-paste recipes for registering a client, verifying signed agent "
+                "cards offline, recording scoped handoffs, and reading immutable receipts."
+            ),
+            "inLanguage": "en",
+            "dateModified": date.today().isoformat(),
+            "author": {"@id": PUBLIC_BASE_URL + "/#organization"},
+            "publisher": {"@id": PUBLIC_BASE_URL + "/#organization"},
+            "mainEntityOfPage": {"@type": "WebPage", "@id": PUBLIC_BASE_URL + "/guide"},
+            "breadcrumb": {"@id": PUBLIC_BASE_URL + "/guide#breadcrumb"},
+        },
+        {
+            "@type": "FAQPage",
+            "@id": PUBLIC_BASE_URL + "/guide#faq",
+            "mainEntity": [
+                {
+                    "@type": "Question",
+                    "name": "Do I need an invite token or approval?",
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": (
+                            "No. agrid register is open self-service. You do need a real "
+                            "email: a 6-digit code is sent there and the API key is created "
+                            "only after you confirm it."
+                        ),
+                    },
+                },
+                {
+                    "@type": "Question",
+                    "name": "I signed up before email verification. How do I update?",
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": (
+                            "Run agrid update --email you@example.com with your existing "
+                            "local key, then agrid verify <code> with the emailed code. "
+                            "Your key is replaced at verification."
+                        ),
+                    },
+                },
+                {
+                    "@type": "Question",
+                    "name": "Does email verification prove I am human?",
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": (
+                            "It proves you control the inbox at signup, which blocks random "
+                            "bot signups and makes every account reachable. It is not a "
+                            "biometric or CAPTCHA-style proof."
+                        ),
+                    },
+                },
+                {
+                    "@type": "Question",
+                    "name": "Where is my API key? The CLI did not print it.",
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": (
+                            "The service shows the key once and the CLI writes it to "
+                            "~/.agentgrid/credentials.json without printing it. Back up "
+                            "that file; there is no secret recovery endpoint."
+                        ),
+                    },
+                },
+                {
+                    "@type": "Question",
+                    "name": "Do I need a payment method to start?",
+                    "acceptedAnswer": {
+                        "@type": "Answer",
+                        "text": (
+                            "No. The free tier needs no card. Payments are entirely "
+                            "external; AgentGrid has no wallet, escrow, checkout, or "
+                            "automatic deduction."
+                        ),
+                    },
+                },
+            ],
+        },
+    ],
+}
+
 GUIDE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>AgentGrid developer guide</title>
-""" + PUBLIC_STYLE + """</head><body>
+""" + _seo_meta(
+    "AgentGrid developer guide — signed cards, scoped handoffs, receipts",
+    "Install AgentGrid, verify signed agent cards offline, record scoped handoffs, read immutable receipts, and upgrade pre-email accounts.",
+    "/guide",
+    structured_data=GUIDE_STRUCTURED_DATA,
+) + PUBLIC_STYLE + """</head><body>
 <h1>Developer guide</h1>
 <p><a href="/">&larr; Home</a></p>
 
@@ -1458,6 +1647,7 @@ OPS_HTML = """<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
 <title>AgentGrid · Operator Live</title>
 <style>
 :root{color-scheme:dark;--bg:#080d1a;--panel:#111a30;--line:#223056;--text:#eaf0ff;--muted:#9db0d0;--accent:#7ee7c7;--warn:#ffcc66;--bad:#ff7b7b}
@@ -1756,9 +1946,69 @@ async def dashboard() -> str:
     return LANDING_HTML
 
 
+@app.get("/robots.txt", response_class=PlainTextResponse)
+async def robots_txt() -> str:
+    return (
+        "User-agent: *\n"
+        "Allow: /\n"
+        "Disallow: /ops\n"
+        "Disallow: /v1/admin/\n"
+        "Disallow: /health/\n"
+        "\n"
+        f"Sitemap: {PUBLIC_BASE_URL}/sitemap.xml\n"
+    )
+
+
+@app.get("/sitemap.xml", response_class=PlainTextResponse)
+async def sitemap_xml(db: AsyncSession = Depends(get_db)) -> str:
+    """Static public pages plus discoverable active agent cards."""
+    today = date.today().isoformat()
+    static_paths = [
+        ("/", "1.0", "weekly"),
+        ("/guide", "0.9", "weekly"),
+        ("/docs", "0.7", "monthly"),
+        ("/openapi.json", "0.5", "monthly"),
+    ]
+    lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ]
+    for path, priority, changefreq in static_paths:
+        lines.append(
+            "  <url><loc>"
+            + html.escape(PUBLIC_BASE_URL + path, quote=True)
+            + "</loc><lastmod>"
+            + today
+            + "</lastmod><changefreq>"
+            + changefreq
+            + "</changefreq><priority>"
+            + priority
+            + "</priority></url>"
+        )
+
+    result = await db.execute(
+        select(AgentModel.agent_id, AgentModel.created_at)
+        .where(AgentModel.status == "ACTIVE")
+        .order_by(AgentModel.created_at.desc())
+        .limit(1000)
+    )
+    for agent_id, created_at in result.all():
+        lastmod = str(created_at or today)[:10]
+        loc = PUBLIC_BASE_URL + "/a/" + quote(str(agent_id), safe="")
+        lines.append(
+            "  <url><loc>"
+            + html.escape(loc, quote=True)
+            + "</loc><lastmod>"
+            + html.escape(lastmod, quote=True)
+            + "</lastmod><changefreq>monthly</changefreq><priority>0.6</priority></url>"
+        )
+    lines.append("</urlset>")
+    return "\n".join(lines) + "\n"
+
+
 @app.get("/ops", response_class=HTMLResponse)
-async def operator_live_page() -> str:
-    return OPS_HTML
+async def operator_live_page() -> HTMLResponse:
+    return HTMLResponse(OPS_HTML, headers={"X-Robots-Tag": "noindex, nofollow"})
 
 
 @app.get("/guide", response_class=HTMLResponse)
@@ -2300,8 +2550,42 @@ async def agent_card_page(agent_id: str, db: AsyncSession = Depends(get_db)) -> 
         return "<h1>Agent not found</h1>"
     card = signed_card(agent)
     capabilities = ", ".join(html.escape(str(cap)) for cap in card["capabilities"]) or "none declared"
+    card_url = PUBLIC_BASE_URL + "/a/" + quote(agent_id, safe="")
+    card_description = (
+        str(card.get("description") or "").strip()
+        or f"Signed AgentGrid card for {card['name']} with offline-verifiable identity and capabilities."
+    )
+    card_structured_data: dict[str, Any] = {
+        "@context": "https://schema.org",
+        "@graph": [
+            {
+                "@type": "WebPage",
+                "@id": card_url + "#webpage",
+                "url": card_url,
+                "name": str(card["name"]) + " — AgentGrid signed card",
+                "description": card_description,
+                "isPartOf": {"@id": PUBLIC_BASE_URL + "/#website"},
+            },
+            {
+                "@type": "SoftwareApplication",
+                "@id": card_url + "#agent",
+                "name": str(card["name"]),
+                "description": card_description,
+                "applicationCategory": "DeveloperApplication",
+                "identifier": str(card["agent_id"]),
+                "url": card_url,
+                "publisher": {"@id": PUBLIC_BASE_URL + "/#organization"},
+            },
+        ],
+    }
+    seo = _seo_meta(
+        str(card["name"]) + " — AgentGrid signed agent card",
+        card_description,
+        "/a/" + quote(agent_id, safe=""),
+        structured_data=card_structured_data,
+    )
     return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>{html.escape(card['name'])} - AgentGrid</title>
+{seo}
 <style>body{{font:16px system-ui;max-width:720px;margin:8vh auto;padding:24px;background:#0b1020;color:#eef}}
 .badge{{color:#7ee7c7}}code{{background:#18213c;padding:2px 6px;border-radius:4px}}</style></head><body>
 <p class="badge">AgentGrid verified card</p><h1>{html.escape(card['name'])}</h1>
