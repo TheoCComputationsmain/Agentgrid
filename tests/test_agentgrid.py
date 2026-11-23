@@ -117,6 +117,7 @@ def test_public_search_discovery_endpoints(api):
     assert robots.status_code == 200
     assert "Sitemap: " + base + "/sitemap.xml" in robots.text
     assert "Disallow: /ops" in robots.text
+    assert "Disallow: /ops-lite" in robots.text
 
     sitemap = api.get("/sitemap.xml")
     assert sitemap.status_code == 200

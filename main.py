@@ -2004,6 +2004,7 @@ async def robots_txt() -> str:
         "User-agent: *\n"
         "Allow: /\n"
         "Disallow: /ops\n"
+        "Disallow: /ops-lite\n"
         "Disallow: /v1/admin/\n"
         "Disallow: /health/\n"
         "\n"

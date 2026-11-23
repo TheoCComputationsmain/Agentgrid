@@ -99,6 +99,21 @@ public agent cards. `/ops`, admin routes, and health routes are disallowed and
 `noindex`. Submit the stable sitemap URL to Google Search Console and Bing Webmaster
 Tools with your own accounts.
 
+## Operator snapshot
+
+There are two operator views:
+
+- `/ops` — full protected console; signs in once with admin key + TOTP.
+- `/ops-lite` — simple read-only counts and recent client details; signs in with
+  one read key and a catch phrase, with no TOTP.
+
+The lite view is configured with `AGENTGRID_OPS_LITE_KEY` and
+`AGENTGRID_OPS_LITE_CATCH`. It sets a 30-day HttpOnly read-only cookie and cannot
+change accounts, tiers, payments, or keys. For embedding in another origin, set
+`AGENTGRID_OPS_LITE_FRAME_ANCESTORS` to that origin, for example
+`https://dashboard.example.com`; it defaults to `'self'`. Both `/ops` paths are
+`noindex` and disallowed in `robots.txt`.
+
 Self-service registration is open to everyone; there is no invite token to
 distribute. A real email is required and its 6-digit code must be confirmed before
 a key exists; the same address also helps recover a mistyped payment Client ID.
