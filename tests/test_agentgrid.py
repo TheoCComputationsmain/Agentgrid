@@ -48,11 +48,26 @@ def _new_agent_key():
     return private, public_b64
 
 
-def _register(api, client_id=None):
-    body = {} if client_id is None else {"client_id": client_id}
+def _register_with_email(api, client_id=None, email=None):
+    """Register and complete the dev-mode email verification flow."""
+    body = {"email": email or f"{uuid.uuid4().hex}@example.test"}
+    if client_id is not None:
+        body["client_id"] = client_id
     response = api.post("/v1/clients/register", json=body)
     assert response.status_code == 201, response.text
-    return response.json()
+    registered = response.json()
+    assert "api_key" not in registered
+    code = registered["verification_code"]
+    verified = api.post(
+        "/v1/clients/verify-email",
+        json={"client_id": registered["client_id"], "code": code},
+    )
+    assert verified.status_code == 200, verified.text
+    return verified.json()
+
+
+def _register(api, client_id=None, email=None):
+    return _register_with_email(api, client_id, email)
 
 
 def _headers(api_key):
@@ -102,17 +117,18 @@ def test_open_registration_and_api_key_auth(api):
 def test_admin_assisted_registration(api):
     path = "/v1/admin/clients/register"
     cid = "admin_reg_" + uuid.uuid4().hex[:10]
-    assert api.post(path, json={"client_id": cid}).status_code == 401
+    body_json = {"client_id": cid, "email": f"admin-{uuid.uuid4().hex[:8]}@example.test"}
+    assert api.post(path, json=body_json).status_code == 401
     assert api.post(
         path,
         headers={"X-AgentGrid-Admin-Key": "test-admin-key"},
-        json={"client_id": cid},
+        json=body_json,
     ).status_code == 401
     admin_headers = {
         "X-AgentGrid-Admin-Key": "test-admin-key",
         "X-AgentGrid-Admin-MFA": _totp(),
     }
-    created = api.post(path, headers=admin_headers, json={"client_id": cid})
+    created = api.post(path, headers=admin_headers, json=body_json)
     assert created.status_code == 201, created.text
     body = created.json()
     assert body["client_id"] == cid
@@ -121,7 +137,7 @@ def test_admin_assisted_registration(api):
     me = api.get("/v1/clients/me", headers=_headers(body["api_key"]))
     assert me.status_code == 200
     assert me.json()["client_id"] == cid
-    duplicate = api.post(path, headers=admin_headers, json={"client_id": cid})
+    duplicate = api.post(path, headers=admin_headers, json=body_json)
     assert duplicate.status_code == 409
 
 
@@ -141,9 +157,11 @@ def test_admin_stats_pulse_filters_test_accounts(api):
     assert after.status_code == 200
     body = after.json()
     assert body["public_users"]["total"] == before_public + 1
+    assert body["public_users"]["verified"] == body["public_users"]["total"]
     assert body["public_users"]["tiers"]["free"] >= 1
     assert body["public_users"]["agents"] >= 1
     assert body["public_users"]["active_users"] >= 1
+    assert "unverified_signups" in body
     assert "smoke_" in body["excluded_prefixes"]
 
 
@@ -433,21 +451,27 @@ def test_production_signing_key_fail_closed():
 
 
 def test_registration_duplicate_invalid_id_and_open_production(api, monkeypatch):
+    missing_email = api.post("/v1/clients/register", json={})
+    assert missing_email.status_code == 422
+
     client_id = "cli_fixed_" + uuid.uuid4().hex[:8]
-    first = _register(api, client_id)
+    email = f"{uuid.uuid4().hex[:8]}@example.test"
+    first = _register(api, client_id, email)
     assert first["client_id"] == client_id
 
-    duplicate = api.post("/v1/clients/register", json={"client_id": client_id})
+    duplicate = api.post("/v1/clients/register", json={"client_id": client_id, "email": email})
     assert duplicate.status_code == 409
 
-    invalid_id = api.post("/v1/clients/register", json={"client_id": "bad id!"})
+    invalid_id = api.post(
+        "/v1/clients/register", json={"client_id": "bad id!", "email": email}
+    )
     assert invalid_id.status_code == 422
 
     # An arbitrary token header is harmless; registration stays open.
     with_token = api.post(
         "/v1/clients/register",
         headers={"X-AgentGrid-Registration-Token": "anything"},
-        json={},
+        json={"email": f"{uuid.uuid4().hex[:8]}@example.test"},
     )
     assert with_token.status_code == 201
 
@@ -460,8 +484,101 @@ def test_registration_duplicate_invalid_id_and_open_production(api, monkeypatch)
     assert unknown_key.status_code == 401
 
     monkeypatch.setattr(main, "APP_ENV", "production")
-    open_in_prod = api.post("/v1/clients/register", json={})
+    open_in_prod = api.post(
+        "/v1/clients/register", json={"email": f"{uuid.uuid4().hex[:8]}@example.test"}
+    )
     assert open_in_prod.status_code == 201
+    assert "verification_code" not in open_in_prod.json()
+    assert "api_key" not in open_in_prod.json()
+
+
+def _pending_registration(api, email=None):
+    client_id = "verify_" + uuid.uuid4().hex[:10]
+    response = api.post(
+        "/v1/clients/register",
+        json={"client_id": client_id, "email": email or f"{uuid.uuid4().hex[:8]}@example.test"},
+    )
+    assert response.status_code == 201, response.text
+    return client_id, response.json()
+
+
+def test_email_verification_issues_key_only_after_code(api):
+    client_id, pending = _pending_registration(api)
+    assert pending["verification_required"] is True
+    assert "api_key" not in pending
+    assert api.get("/v1/clients/me", headers={"X-AgentGrid-API-Key": "agk_" + "0" * 43}).status_code == 401
+
+    correct = pending["verification_code"]
+    wrong = "000000" if correct != "000000" else "111111"
+    failed = api.post(
+        "/v1/clients/verify-email", json={"client_id": client_id, "code": wrong}
+    )
+    assert failed.status_code == 400
+    assert "attempt(s) remaining" in failed.json()["detail"]
+
+    with sqlite3.connect(TEST_DB_PATH) as conn:
+        attempts = conn.execute(
+            "SELECT verification_attempts FROM clients WHERE client_id = ?", (client_id,)
+        ).fetchone()[0]
+    assert attempts == 1
+
+    verified = api.post(
+        "/v1/clients/verify-email", json={"client_id": client_id, "code": correct}
+    )
+    assert verified.status_code == 200, verified.text
+    api_key = verified.json()["api_key"]
+    assert api_key.startswith("agk_")
+    assert api.get("/v1/clients/me", headers=_headers(api_key)).status_code == 200
+
+    replay = api.post(
+        "/v1/clients/verify-email", json={"client_id": client_id, "code": correct}
+    )
+    assert replay.status_code == 409
+
+    with sqlite3.connect(TEST_DB_PATH) as conn:
+        row = conn.execute(
+            "SELECT email_verified, verification_code_hash, verification_sent_at "
+            "FROM clients WHERE client_id = ?",
+            (client_id,),
+        ).fetchone()
+    assert row == (1, None, None)
+
+
+def test_verification_expiry_resend_and_attempt_limit(api):
+    client_id, pending = _pending_registration(api)
+    code = pending["verification_code"]
+    with sqlite3.connect(TEST_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE clients SET verification_expires_at = ? WHERE client_id = ?",
+            ("2000-01-01T00:00:00+00:00", client_id),
+        )
+    expired = api.post(
+        "/v1/clients/verify-email", json={"client_id": client_id, "code": code}
+    )
+    assert expired.status_code == 410
+
+    too_soon = api.post("/v1/clients/resend-verification", json={"client_id": client_id})
+    assert too_soon.status_code == 429
+
+    with sqlite3.connect(TEST_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE clients SET verification_sent_at = ? WHERE client_id = ?",
+            ("2000-01-01T00:00:00+00:00", client_id),
+        )
+    resent = api.post("/v1/clients/resend-verification", json={"client_id": client_id})
+    assert resent.status_code == 200, resent.text
+    new_code = resent.json()["verification_code"]
+
+    wrong_codes = [f"{value:06d}" for value in range(10) if f"{value:06d}" != new_code][:5]
+    for wrong in wrong_codes:
+        failed = api.post(
+            "/v1/clients/verify-email", json={"client_id": client_id, "code": wrong}
+        )
+        assert failed.status_code == 400
+    locked = api.post(
+        "/v1/clients/verify-email", json={"client_id": client_id, "code": new_code}
+    )
+    assert locked.status_code == 429
 
 
 def test_agent_validation_failures(api):
@@ -1031,6 +1148,8 @@ def test_guide_has_three_step_quickstart_recipes_and_faq(api):
     assert "Start here: 3 steps" in guide
     for marker in (
         "agrid register",
+        "agrid verify",
+        "agrid resend",
         "agrid quickstart",
         "agrid card",
         "agrid receipts",
@@ -1047,7 +1166,7 @@ def test_guide_has_three_step_quickstart_recipes_and_faq(api):
     assert "developer guide" in description
 
 
-def test_welcome_email_sends_three_steps_without_api_key(api, monkeypatch):
+def test_verification_and_welcome_emails_via_webhook(api, monkeypatch):
     import welcome_email
 
     captured: list[tuple] = []
@@ -1060,10 +1179,24 @@ def test_welcome_email_sends_three_steps_without_api_key(api, monkeypatch):
     )
 
     cid = "welcome_" + uuid.uuid4().hex[:10]
-    response = api.post(
+    registered = api.post(
         "/v1/clients/register", json={"client_id": cid, "email": "New.User@Example.com"}
     )
-    assert response.status_code == 201, response.text
+    assert registered.status_code == 201, registered.text
+    assert len(captured) == 1
+    url, verify_payload, token = captured[0]
+    assert url == "https://example.test/hook"
+    assert token == "webhook-token"
+    assert verify_payload["type"] == "agentgrid.verify"
+    assert "verification code" in verify_payload["subject"]
+    assert registered.json()["verification_code"] in verify_payload["text"]
+
+    captured.clear()
+    response = api.post(
+        "/v1/clients/verify-email",
+        json={"client_id": cid, "code": registered.json()["verification_code"]},
+    )
+    assert response.status_code == 200, response.text
     assert len(captured) == 1
 
     url, payload, token = captured[0]
@@ -1081,7 +1214,7 @@ def test_welcome_email_sends_three_steps_without_api_key(api, monkeypatch):
     assert api_key not in payload["html"]
 
 
-def test_welcome_email_failure_never_breaks_registration(api, monkeypatch):
+def test_email_failure_never_breaks_registration_or_verification(api, monkeypatch):
     import welcome_email
 
     monkeypatch.setenv(welcome_email.WEBHOOK_URL_ENV, "https://example.test/hook")
@@ -1092,14 +1225,20 @@ def test_welcome_email_failure_never_breaks_registration(api, monkeypatch):
 
     monkeypatch.setattr(welcome_email, "_poster", boom)
     cid = "welcome_" + uuid.uuid4().hex[:10]
-    response = api.post(
+    registered = api.post(
         "/v1/clients/register", json={"client_id": cid, "email": "down@example.com"}
     )
-    assert response.status_code == 201, response.text
-    assert response.json()["client_id"] == cid
+    assert registered.status_code == 201, registered.text
+    verified = api.post(
+        "/v1/clients/verify-email",
+        json={"client_id": cid, "code": registered.json()["verification_code"]},
+    )
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["client_id"] == cid
+    assert verified.json()["api_key"].startswith("agk_")
 
 
-def test_welcome_email_disabled_without_webhook(api, monkeypatch):
+def test_emails_disabled_without_provider(api, monkeypatch):
     import welcome_email
 
     monkeypatch.delenv(welcome_email.WEBHOOK_URL_ENV, raising=False)
@@ -1108,14 +1247,19 @@ def test_welcome_email_disabled_without_webhook(api, monkeypatch):
     captured: list[tuple] = []
     monkeypatch.setattr(welcome_email, "_poster", lambda *args: captured.append(args))
     cid = "nowelcome_" + uuid.uuid4().hex[:10]
-    response = api.post(
+    registered = api.post(
         "/v1/clients/register", json={"client_id": cid, "email": "quiet@example.com"}
     )
-    assert response.status_code == 201, response.text
+    assert registered.status_code == 201, registered.text
+    verified = api.post(
+        "/v1/clients/verify-email",
+        json={"client_id": cid, "code": registered.json()["verification_code"]},
+    )
+    assert verified.status_code == 200, verified.text
     assert captured == []
 
 
-def test_welcome_email_uses_resend_when_configured(api, monkeypatch):
+def test_verification_and_welcome_use_resend_when_configured(api, monkeypatch):
     import welcome_email
 
     monkeypatch.delenv(welcome_email.WEBHOOK_URL_ENV, raising=False)
@@ -1129,10 +1273,21 @@ def test_welcome_email_uses_resend_when_configured(api, monkeypatch):
     )
 
     cid = "resend_" + uuid.uuid4().hex[:10]
-    response = api.post(
+    registered = api.post(
         "/v1/clients/register", json={"client_id": cid, "email": "Buyer@Example.com"}
     )
-    assert response.status_code == 201, response.text
+    assert registered.status_code == 201, registered.text
+    assert len(captured) == 1
+    verify_payload, key = captured[0]
+    assert key == "re_test_key"
+    assert verify_payload["subject"].startswith("Your AgentGrid verification code")
+
+    captured.clear()
+    response = api.post(
+        "/v1/clients/verify-email",
+        json={"client_id": cid, "code": registered.json()["verification_code"]},
+    )
+    assert response.status_code == 200, response.text
     assert len(captured) == 1
     payload, key = captured[0]
     assert key == "re_test_key"
@@ -1143,7 +1298,7 @@ def test_welcome_email_uses_resend_when_configured(api, monkeypatch):
     assert response.json()["api_key"] not in payload["html"]
 
 
-def test_welcome_email_uses_smtp_when_configured(api, monkeypatch):
+def test_verification_and_welcome_use_smtp_when_configured(api, monkeypatch):
     import welcome_email
 
     monkeypatch.delenv(welcome_email.WEBHOOK_URL_ENV, raising=False)
@@ -1157,10 +1312,19 @@ def test_welcome_email_uses_smtp_when_configured(api, monkeypatch):
     monkeypatch.setattr(welcome_email, "_smtp_send", lambda *args: captured.append(args))
 
     cid = "smtp_" + uuid.uuid4().hex[:10]
-    response = api.post(
+    registered = api.post(
         "/v1/clients/register", json={"client_id": cid, "email": "SMTP.User@Example.com"}
     )
-    assert response.status_code == 201, response.text
+    assert registered.status_code == 201, registered.text
+    assert len(captured) == 1
+    assert captured[0][0]["Subject"].startswith("Your AgentGrid verification code")
+
+    captured.clear()
+    response = api.post(
+        "/v1/clients/verify-email",
+        json={"client_id": cid, "code": registered.json()["verification_code"]},
+    )
+    assert response.status_code == 200, response.text
     assert len(captured) == 1
     mail, host, port, user, password = captured[0]
     assert mail["To"] == "smtp.user@example.com"

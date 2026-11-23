@@ -27,20 +27,24 @@ AgentGrid answers all three with one small HTTP API and a Python SDK.
 
 ## 60-second quickstart
 
-Registration is open self-service — no invite token, no operator approval.
+Registration is open self-service — no invite token, no operator approval — but
+a real email is required to confirm a reachable human.
 
 ```bash
 pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
+agrid verify 123456          # 6-digit code from your inbox
 agrid quickstart
 agrid card <agent_id>        # ag_... ID printed by quickstart
 agrid receipts <agent_id>    # worker ID printed by quickstart
 ```
 
-`agrid register` stores your one-time `agk_...` key locally, never prints it,
-and then shows the exact next steps. `agrid quickstart` registers two agents,
-verifies a card online and offline, signs a handoff, and reads the receipt.
-`agrid card` and `agrid receipts` let you check that work afterwards.
+`agrid register` sends a code and creates no key yet. `agrid verify` confirms it
+and stores your one-time `agk_...` key locally without printing it, then shows
+the exact next steps. If the code expires, run `agrid resend`. `agrid quickstart`
+registers two agents, verifies a card online and offline, signs a handoff, and
+reads the receipt. `agrid card` and `agrid receipts` let you check that work
+afterwards.
 
 ```text
 AgentGrid quickstart -> https://agentgrid-pied.vercel.app

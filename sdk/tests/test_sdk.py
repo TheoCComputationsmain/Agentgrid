@@ -30,9 +30,18 @@ def fake_client():
         if method == "POST" and path == "/v1/clients/register":
             return 201, {
                 "client_id": "cli_fake123",
+                "verification_required": True,
+                "tier": "free",
+            }
+        if method == "POST" and path == "/v1/clients/verify-email":
+            return 200, {
+                "client_id": body["client_id"],
+                "email_verified": True,
                 "api_key": "agk_fake_key",
                 "tier": "free",
             }
+        if method == "POST" and path == "/v1/clients/resend-verification":
+            return 200, {"client_id": body["client_id"], "verification_required": True}
         if path == "/health/ready":
             return 200, {"status": "ready", "database": "connected"}
         if path == "/v1/clients/me":
@@ -142,59 +151,135 @@ def test_unsigned_card_drops_response_metadata():
     assert unsigned_card(card) == {"agent_id": "ag_1"}
 
 
-def test_register_uses_open_endpoint_and_stores_key():
+def test_register_then_verify_issues_key():
     calls: list[dict] = []
 
     def transport(method, path, body, headers):
         calls.append({"method": method, "path": path, "body": body, "headers": headers})
-        return 201, {"client_id": "cli_new", "api_key": "agk_new_key", "tier": "free"}
+        if path == "/v1/clients/register":
+            return 201, {
+                "client_id": "cli_new",
+                "verification_required": True,
+                "tier": "free",
+            }
+        return 200, {"client_id": "cli_new", "api_key": "agk_new_key", "tier": "free"}
 
     client = AgentGrid(api_key=None, transport=transport)
-    result = client.register(email="me@example.com")
+    registered = client.register(email="me@example.com")
+    assert registered["client_id"] == "cli_new"
+    assert "api_key" not in registered
+    assert client.api_key is None
 
-    assert result["client_id"] == "cli_new"
+    verified = client.verify_email("cli_new", "123456")
+    assert verified["api_key"] == "agk_new_key"
     assert client.api_key == "agk_new_key"
+
     assert calls[0]["path"] == "/v1/clients/register"
     assert calls[0]["body"] == {"email": "me@example.com"}
     assert "X-AgentGrid-API-Key" not in calls[0]["headers"]
+    assert calls[1]["path"] == "/v1/clients/verify-email"
+    assert calls[1]["body"] == {"client_id": "cli_new", "code": "123456"}
+    assert "X-AgentGrid-API-Key" not in calls[1]["headers"]
 
 
-def test_cli_register_stores_key_without_printing(monkeypatch, capsys):
+def test_register_requires_email_and_verify_validates_code():
+    client = AgentGrid(api_key=None, transport=lambda *a: (201, {}))
+    with pytest.raises(AgentGridError) as exc:
+        client.register(email="   ")
+    assert "real email is required" in str(exc.value)
+
+    with pytest.raises(AgentGridError) as exc:
+        client.verify_email("cli_new", "12ab")
+    assert "6-digit code" in str(exc.value)
+
+
+def test_cli_register_prints_verify_step_and_stores_no_key(monkeypatch, capsys):
     saved: dict[str, str] = {}
+    pending: dict[str, str] = {}
 
     class Fake:
         base_url = "https://agentgrid-pied.vercel.app"
 
-        def register(self, *, email="", client_id=""):
+        def register(self, *, email, client_id=""):
             assert email == "me@example.com"
             return {
                 "client_id": "cli_cli123",
-                "api_key": "agk_secret_from_register",
+                "verification_required": True,
                 "tier": "free",
             }
 
+    monkeypatch.setattr(cli, "AgentGrid", lambda **kwargs: Fake())
     def fake_save(key):
         saved["key"] = key
         return "creds.json"
 
-    monkeypatch.setattr(cli, "AgentGrid", lambda **kwargs: Fake())
     monkeypatch.setattr(cli, "save_api_key", fake_save)
+    monkeypatch.setattr(
+        cli,
+        "save_pending_client",
+        lambda client_id: pending.setdefault("client_id", client_id) or "pending.json",
+    )
 
     assert cli.main(["register", "--email", "me@example.com"]) == 0
     output = capsys.readouterr().out
     assert "cli_cli123" in output
-    assert "agk_secret_from_register" not in output
-    assert saved["key"] == "agk_secret_from_register"
-    # The register output must tell a brand-new user exactly what to do next.
+    assert pending["client_id"] == "cli_cli123"
+    assert saved == {}
+    assert "No API key exists yet" in output
+    assert "agrid verify" in output
+    assert "agrid resend" in output
+    assert "/guide" in output
+    assert "/docs" in output
+
+
+def test_cli_verify_saves_key_and_clears_pending(monkeypatch, capsys):
+    saved: dict[str, str] = {}
+    cleared: list[bool] = []
+
+    class Fake:
+        base_url = "https://agentgrid-pied.vercel.app"
+
+        def verify_email(self, client_id, code):
+            assert client_id == "cli_cli123"
+            assert code == "123456"
+            return {"api_key": "agk_verified_secret", "tier": "free"}
+
+    monkeypatch.setattr(cli, "AgentGrid", lambda **kwargs: Fake())
+    monkeypatch.setattr(cli, "load_pending_client", lambda: "cli_cli123")
+    def fake_save(key):
+        saved["key"] = key
+        return "creds.json"
+
+    monkeypatch.setattr(cli, "save_api_key", fake_save)
+    monkeypatch.setattr(cli, "clear_pending_client", lambda: cleared.append(True))
+
+    assert cli.main(["verify", "123456"]) == 0
+    output = capsys.readouterr().out
+    assert saved["key"] == "agk_verified_secret"
+    assert "agk_verified_secret" not in output
+    assert cleared == [True]
+    assert "Email verified" in output
     assert "three steps to your first signed handoff" in output
-    for step in (
-        "agrid quickstart",
-        "agrid card <agent_id>",
-        "agrid receipts <agent_id>",
-        "/guide",
-        "/docs",
-    ):
+    for step in ("agrid quickstart", "agrid card <agent_id>", "agrid receipts <agent_id>"):
         assert step in output
+
+
+def test_cli_resend_uses_pending_client(monkeypatch, capsys):
+    called: list[str] = []
+
+    class Fake:
+        base_url = "https://agentgrid-pied.vercel.app"
+
+        def resend_verification(self, client_id):
+            called.append(client_id)
+            return {"client_id": client_id, "verification_required": True}
+
+    monkeypatch.setattr(cli, "AgentGrid", lambda **kwargs: Fake())
+    monkeypatch.setattr(cli, "load_pending_client", lambda: "cli_cli123")
+
+    assert cli.main(["resend"]) == 0
+    assert called == ["cli_cli123"]
+    assert "fresh 6-digit code" in capsys.readouterr().out
 
 
 def test_cli_quickstart_prints_success(monkeypatch, capsys):

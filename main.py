@@ -20,7 +20,7 @@ import struct
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -29,7 +29,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from welcome_email import send_welcome_email
+from welcome_email import send_verification_email, send_welcome_email
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -317,6 +317,11 @@ class ClientModel(Base):
     client_id = Column(String(100), primary_key=True)
     api_key_hash = Column(String(64), unique=True, nullable=False, index=True)
     email = Column(String(320), nullable=True, index=True)
+    email_verified = Column(Boolean, nullable=False, default=True)
+    verification_code_hash = Column(String(64), nullable=True)
+    verification_expires_at = Column(String(40), nullable=True)
+    verification_sent_at = Column(String(40), nullable=True)
+    verification_attempts = Column(Integer, nullable=False, default=0)
     tier = Column(String(20), nullable=False, default="free")
     handoffs_used = Column(Integer, nullable=False, default=0)
     period_month = Column(String(7), nullable=False, default="")
@@ -622,10 +627,13 @@ app = FastAPI(
         "```bash\n"
         "pip install theoc-agentgrid-protocol\n"
         "agrid register --email you@example.com\n"
+        "agrid verify <6-digit-code-from-your-inbox>\n"
         "agrid quickstart\n"
         "agrid card <agent_id>\n"
         "agrid receipts <agent_id>\n"
         "```\n\n"
+        "A real email is required. The API key is created only after you confirm "
+        "the emailed code, so unverified signups cannot use the service. "
         "Copy-paste recipes (offline verify, scoped handoff, receipt read) and the "
         "FAQ live in the [developer guide](/guide). Registration is open "
         "self-service; payments happen outside AgentGrid."
@@ -764,7 +772,7 @@ async def verify_api_key(
         select(ClientModel).where(ClientModel.api_key_hash == hash_api_key(x_agentgrid_api_key))
     )
     client = result.scalar_one_or_none()
-    if not client:
+    if not client or not client.email_verified:
         raise HTTPException(status_code=401, detail="Access Denied: invalid API key.")
     return client.client_id
 
@@ -898,12 +906,21 @@ def scope_is_subset(child: dict[str, Any], parent: dict[str, Any]) -> bool:
 # ---------------------------------------------------------------------------
 class RegisterClientRequest(BaseModel):
     client_id: Optional[str] = Field(None, min_length=3, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
-    email: Optional[str] = Field(
-        None,
+    email: str = Field(
+        ...,
         max_length=320,
         pattern=r"^[^@\s]+@[^@\s]+\.[^@\s]+$",
-        description="Used to match an external payment if the form Client ID is wrong.",
+        description="Required. A code is sent here to confirm a real human before a key is issued.",
     )
+
+
+class VerifyEmailRequest(BaseModel):
+    client_id: str = Field(..., min_length=3, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
+    code: str = Field(..., min_length=6, max_length=6, pattern=r"^[0-9]{6}$")
+
+
+class ResendVerificationRequest(BaseModel):
+    client_id: str = Field(..., min_length=3, max_length=100, pattern=r"^[a-zA-Z0-9_-]+$")
 
 
 class UpdateEmailRequest(BaseModel):
@@ -987,11 +1004,13 @@ ledger; money never enters the platform.</p>
 <h2>Three commands to your first handoff</h2>
 <pre>pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
+agrid verify 123456       # code from your inbox
 agrid quickstart</pre>
-<p><code>agrid register</code> creates a free client instantly — no invite token — and stores
-your <code>agk_...</code> key locally without printing it. The email is optional but lets us
-recover a mistyped Client ID on a payment form. <code>agrid quickstart</code> registers two
-agents, verifies a card online and offline, signs a handoff, and reads the receipt. See the
+<p><code>agrid register</code> is open self-service — no invite token — but a real email is
+required. We send a 6-digit code; your <code>agk_...</code> key is created only after
+<code>agrid verify</code>, then stored locally without printing it. Unverified signups have no
+usable key. <code>agrid quickstart</code> registers two agents, verifies a card online and
+offline, signs a handoff, and reads the receipt. See the
 <a href="/guide">developer guide</a> for Python usage and API details.</p>
 
 <h2>Pricing</h2>
@@ -1029,9 +1048,11 @@ GUIDE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 
 <h2 id="quickstart">Start here: 3 steps (~1 minute)</h2>
 <ol>
-<li><strong>Install and register.</strong> Run <code>pip install theoc-agentgrid-protocol</code>,
-then <code>agrid register --email you@example.com</code>. It is free and open — no invite
-token and no card. Your <code>agk_...</code> key is stored locally and never printed; back it up.</li>
+<li><strong>Install, register, verify.</strong> Run <code>pip install theoc-agentgrid-protocol</code>,
+then <code>agrid register --email you@example.com</code>. It is free and open — no invite token
+or card — but a real email is required. Check your inbox for a 6-digit code and run
+<code>agrid verify 123456</code>. Your <code>agk_...</code> key is created only at that point,
+stored locally, and never printed; back it up.</li>
 <li><strong>Run one real handoff.</strong> <code>agrid quickstart</code> creates two agents,
 verifies a card online and offline, signs a handoff, and reads its receipt. Note the
 <code>ag_...</code> IDs it prints.</li>
@@ -1040,6 +1061,7 @@ card offline; <code>agrid receipts &lt;agent_id&gt;</code> reads the immutable r
 </ol>
 <pre>pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
+agrid verify 123456          # code emailed to you
 agrid quickstart
 agrid card &lt;agent_id&gt;      # an ag_... ID from step 2
 agrid receipts &lt;agent_id&gt;  # the worker ID from step 2</pre>
@@ -1049,12 +1071,15 @@ Stuck? Jump to the <a href="#faq">FAQ</a>.</p>
 <h2>Registration details</h2>
 <pre>pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
+agrid verify 123456          # code emailed to you
 agrid doctor</pre>
-<p><code>agrid register</code> creates a free client instantly — no invite token or operator
-approval — and stores your <code>agk_...</code> key under
-<code>~/.agentgrid/credentials.json</code> without printing it. The email is optional but
-recommended: it lets us recover the right Client ID if you mistype it on a payment form.
-Use <code>agrid login</code> instead if you already have a key, or set
+<p><code>agrid register</code> is open self-service — no invite token or operator approval —
+but <code>--email</code> is required. We send a single-use 6-digit code that expires in 15
+minutes; <code>agrid verify</code> confirms it and only then creates your <code>agk_...</code>
+key under <code>~/.agentgrid/credentials.json</code> without printing it. Until then the
+account has no usable key. If the code expires, run <code>agrid resend</code> (one code per
+60 seconds). The same email is used to recover a mistyped Client ID on a payment form.
+Use <code>agrid login</code> if you already have a key, or set
 <code>AGENTGRID_API_KEY</code> in the environment.</p>
 
 <h2>Your first verified handoff</h2>
@@ -1173,7 +1198,13 @@ and the same AgentGrid Client ID.</p>
 <p class="muted">These are the questions new users hit most often. If yours is not here, tell us — this list grows from real feedback.</p>
 
 <h3>Do I need an invite token or approval?</h3>
-<p>No. <code>agrid register</code> is open self-service. The email flag is optional.</p>
+<p>No. <code>agrid register</code> is open self-service. You do need a real email: a 6-digit
+code is sent there and the API key is created only after you confirm it.</p>
+
+<h3>Does email verification prove I am human?</h3>
+<p>It proves you control the inbox at signup, which blocks random bot signups and makes every
+account reachable. It is not a biometric or CAPTCHA-style proof. Unverified signups have no
+key and cannot call the API.</p>
 
 <h3>Where is my API key? The CLI did not print it.</h3>
 <p>By design. The service shows the <code>agk_...</code> key once and the CLI writes it to
@@ -1237,13 +1268,44 @@ async def developer_guide() -> str:
 # ---------------------------------------------------------------------------
 # Clients
 # ---------------------------------------------------------------------------
-def _new_client_record(client_id: str, email: str | None = None) -> tuple[ClientModel, str]:
-    raw_key = "agk_" + secrets.token_urlsafe(32)
-    today = datetime.now(timezone.utc).date()
+VERIFICATION_TTL_MINUTES = 15
+MAX_VERIFICATION_ATTEMPTS = 5
+
+
+def _verification_secret() -> bytes:
+    return (
+        os.environ.get("AGENTGRID_SIGNING_KEY_B64")
+        or ADMIN_KEY
+        or "agentgrid-development"
+    ).encode("utf-8")
+
+
+def _hash_verification_code(client_id: str, code: str) -> str:
+    return hmac.new(
+        _verification_secret(), f"{client_id}:{code}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def _new_client_record(
+    client_id: str, email: str | None = None, *, require_verification: bool = False
+) -> tuple[ClientModel, Optional[str], Optional[str]]:
+    """Create a client row. Public signups get no usable key until verified."""
+    raw_key = None if require_verification else "agk_" + secrets.token_urlsafe(32)
+    # Unverified rows still need a unique api_key_hash; this value is random and
+    # never returned, so it cannot authenticate anyone.
+    key_hash = hash_api_key(raw_key or "agk_" + secrets.token_urlsafe(32))
+    code = f"{secrets.randbelow(1_000_000):06d}" if require_verification else None
+    now = datetime.now(timezone.utc)
+    today = now.date()
     client = ClientModel(
         client_id=client_id,
-        api_key_hash=hash_api_key(raw_key),
+        api_key_hash=key_hash,
         email=(email or "").strip().lower() or None,
+        email_verified=not require_verification,
+        verification_code_hash=_hash_verification_code(client_id, code) if code else None,
+        verification_expires_at=(now + timedelta(minutes=VERIFICATION_TTL_MINUTES)).isoformat() if code else None,
+        verification_sent_at=now.isoformat() if code else None,
+        verification_attempts=0,
         tier="free",
         handoffs_used=0,
         period_month=today.strftime("%Y-%m"),
@@ -1253,28 +1315,50 @@ def _new_client_record(client_id: str, email: str | None = None) -> tuple[Client
         access_expires_at=None,
         created_at=_now_iso(),
     )
-    return client, raw_key
+    return client, raw_key, code
 
 
 async def _create_client_db(
-    db: AsyncSession, client_id: str, *, audit_action: str, email: str | None = None
+    db: AsyncSession,
+    client_id: str,
+    *,
+    audit_action: str,
+    email: str | None = None,
+    require_verification: bool = False,
 ) -> dict[str, Any]:
     existing = await db.get(ClientModel, client_id)
     if existing:
         raise HTTPException(status_code=409, detail="Client ID already registered.")
-    client, raw_key = _new_client_record(client_id, email)
+    client, raw_key, code = _new_client_record(
+        client_id, email, require_verification=require_verification
+    )
     db.add(client)
     record_audit(db, client_id=client_id, action=audit_action, target_type="client", target_id=client_id)
     await db.commit()
-    return {
+    result: dict[str, Any] = {
         "client_id": client_id,
-        "api_key": raw_key,
         "tier": "free",
         "limits": TIER_LIMITS["free"],
         "cycle_start": client.cycle_start,
         "cycle_end": client.cycle_end,
-        "message": "Store the API key now; it is shown only once.",
     }
+    if raw_key:
+        result["api_key"] = raw_key
+        result["message"] = "Store the API key now; it is shown only once."
+    else:
+        result["verification_required"] = True
+        result["email"] = client.email
+        result["message"] = (
+            "Check your inbox for a 6-digit code, then run `agrid verify <code>` "
+            "or POST /v1/clients/verify-email. No API key exists until then."
+        )
+    if code:
+        # Internal only; the endpoint removes this before returning.
+        result["_verification_code"] = code
+        # Local/dev convenience only; production never exposes the code in a response.
+        if APP_ENV != "production":
+            result["verification_code"] = code
+    return result
 
 
 @app.post("/v1/clients/register", status_code=status.HTTP_201_CREATED)
@@ -1283,20 +1367,163 @@ async def register_client(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
-    """Open self-service registration for the free tier.
+    """Open self-service registration for the free tier, with email verification.
 
-    Anyone can register; there is no invite token to distribute. Abuse is
-    bounded by the shared 120 req/min rate limit and the free-tier caps.
-    Supplying an email is optional but lets the operator recover a mistyped
-    Client ID from a signed payment form without ever seeing payment details,
-    and triggers the three-step welcome email when a webhook is configured.
+    Anyone can register; there is no invite token to distribute. A real email
+    is required and a 6-digit code is sent to it. No API key exists until the
+    code is confirmed, so unverified signups cannot use the service.
     """
     client_id = payload.client_id or "cli_" + uuid.uuid4().hex
     result = await _create_client_db(
-        db, client_id, audit_action="client.registered", email=payload.email
+        db,
+        client_id,
+        audit_action="client.registered",
+        email=payload.email,
+        require_verification=True,
     )
-    await send_welcome_email(payload.email, client_id, str(request.base_url))
+    code = result.pop("_verification_code", "")
+    await send_verification_email(payload.email, client_id, code, str(request.base_url))
     return result
+
+
+def _code_expired(value: Optional[str]) -> bool:
+    expires = _parse_iso(value)
+    if not expires:
+        return True
+    if expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    return expires <= datetime.now(timezone.utc)
+
+
+def _verification_pending_response(client: ClientModel) -> dict[str, Any]:
+    return {
+        "client_id": client.client_id,
+        "email": client.email,
+        "verification_required": True,
+        "message": (
+            "Check your inbox for a 6-digit code, then run `agrid verify <code>` "
+            "or POST /v1/clients/verify-email. No API key exists until then."
+        ),
+    }
+
+
+@app.post("/v1/clients/verify-email")
+async def verify_email(
+    payload: VerifyEmailRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Confirm inbox control, then create and return the client's first API key.
+
+    Only a 6-digit code sent to the registered email can move a public signup
+    out of the unverified state. Codes are stored hashed, expire after 15
+    minutes, and allow at most five wrong attempts before a resend is needed.
+    """
+    result = await db.execute(_client_stmt(payload.client_id))
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found.")
+    if client.email_verified:
+        raise HTTPException(status_code=409, detail="Email already verified.")
+    if not client.verification_code_hash:
+        raise HTTPException(status_code=400, detail="No code pending. Run `agrid resend`.")
+    if _code_expired(client.verification_expires_at):
+        raise HTTPException(status_code=410, detail="Verification code expired. Run `agrid resend`.")
+    if (client.verification_attempts or 0) >= MAX_VERIFICATION_ATTEMPTS:
+        raise HTTPException(
+            status_code=429,
+            detail="Too many wrong codes. Run `agrid resend` to get a new one.",
+        )
+
+    candidate = _hash_verification_code(client.client_id, payload.code)
+    if not hmac.compare_digest(candidate, client.verification_code_hash):
+        client.verification_attempts = (client.verification_attempts or 0) + 1
+        await db.commit()
+        remaining = max(0, MAX_VERIFICATION_ATTEMPTS - client.verification_attempts)
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid code. {remaining} attempt(s) remaining.",
+        )
+
+    raw_key = "agk_" + secrets.token_urlsafe(32)
+    client.api_key_hash = hash_api_key(raw_key)
+    client.email_verified = True
+    client.verification_code_hash = None
+    client.verification_expires_at = None
+    client.verification_sent_at = None
+    client.verification_attempts = 0
+    record_audit(
+        db,
+        client_id=client.client_id,
+        action="client.email_verified",
+        target_type="client",
+        target_id=client.client_id,
+        metadata={"email": client.email},
+    )
+    await db.commit()
+    await send_welcome_email(client.email or "", client.client_id, str(request.base_url))
+    return {
+        "client_id": client.client_id,
+        "email_verified": True,
+        "api_key": raw_key,
+        "tier": active_tier(client),
+        "limits": TIER_LIMITS[active_tier(client)],
+        "cycle_start": client.cycle_start,
+        "cycle_end": client.cycle_end,
+        "message": "Email verified. Store this API key now; it is shown only once.",
+    }
+
+
+RESEND_COOLDOWN_SECONDS = 60
+
+
+@app.post("/v1/clients/resend-verification")
+async def resend_verification(
+    payload: ResendVerificationRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Issue a fresh 6-digit code after the cooldown, resetting wrong attempts."""
+    result = await db.execute(_client_stmt(payload.client_id))
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found.")
+    if client.email_verified:
+        raise HTTPException(status_code=409, detail="Email already verified.")
+
+    now = datetime.now(timezone.utc)
+    sent = _parse_iso(client.verification_sent_at)
+    if sent:
+        if sent.tzinfo is None:
+            sent = sent.replace(tzinfo=timezone.utc)
+        if (now - sent).total_seconds() < RESEND_COOLDOWN_SECONDS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Please wait {RESEND_COOLDOWN_SECONDS} seconds before requesting another code.",
+            )
+    if not client.email:
+        raise HTTPException(status_code=400, detail="No email on file for this client.")
+
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    client.verification_code_hash = _hash_verification_code(client.client_id, code)
+    client.verification_expires_at = (now + timedelta(minutes=VERIFICATION_TTL_MINUTES)).isoformat()
+    client.verification_sent_at = now.isoformat()
+    client.verification_attempts = 0
+    record_audit(
+        db,
+        client_id=client.client_id,
+        action="client.verification_resent",
+        target_type="client",
+        target_id=client.client_id,
+        metadata={"email": client.email},
+    )
+    await db.commit()
+
+    response = _verification_pending_response(client)
+    if APP_ENV != "production":
+        response["verification_code"] = code
+    await send_verification_email(client.email, client.client_id, code, str(request.base_url))
+    return response
 
 
 @app.post("/v1/admin/clients/register", status_code=status.HTTP_201_CREATED)
@@ -1980,6 +2207,7 @@ async def admin_stats(
                 active_users += 1
         return {
             "total": len(rows),
+            "verified": sum(1 for client in rows if client.email_verified),
             "tiers": tiers,
             "paid_active": paid_active,
             "agents": agents,
@@ -1993,11 +2221,14 @@ async def admin_stats(
         for client in clients
         if not client.client_id.startswith(OPERATOR_TEST_PREFIXES)
     ]
+    verified_public_clients = [client for client in public_clients if client.email_verified]
     return {
         "generated_at": now.isoformat(),
         "limit": bounded,
         "all_accounts": summarize(clients),
-        "public_users": summarize(public_clients),
+        # Public user counts only include humans who confirmed inbox control.
+        "public_users": summarize(verified_public_clients),
+        "unverified_signups": len(public_clients) - len(verified_public_clients),
         "test_accounts_excluded": len(clients) - len(public_clients),
         "excluded_prefixes": list(OPERATOR_TEST_PREFIXES),
     }

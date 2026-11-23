@@ -6,7 +6,15 @@ import getpass
 import json
 from typing import Optional
 
-from .client import AgentGrid, AgentGridError, load_api_key, save_api_key
+from .client import (
+    AgentGrid,
+    AgentGridError,
+    clear_pending_client,
+    load_api_key,
+    load_pending_client,
+    save_api_key,
+    save_pending_client,
+)
 
 
 def _client(args: argparse.Namespace) -> AgentGrid:
@@ -27,13 +35,7 @@ def _require_key(args: argparse.Namespace, *, prompt: bool = True) -> str:
     return entered
 
 
-def cmd_register(args: argparse.Namespace) -> int:
-    client = _client(args)
-    result = client.register(email=args.email or "", client_id=args.client_id or "")
-    path = save_api_key(result["api_key"])
-    print("Registered client: " + str(result["client_id"]) + " (tier: " + str(result["tier"]) + ")")
-    print("API key stored at " + str(path) + " (not displayed).")
-    print("Save a backup of that key now; the service shows it only once.")
+def _next_steps(client: AgentGrid) -> None:
     print()
     print("Next - three steps to your first signed handoff:")
     print("  1. agrid quickstart")
@@ -45,6 +47,60 @@ def cmd_register(args: argparse.Namespace) -> int:
     print()
     print("Guide: " + client.base_url + "/guide")
     print("API:   " + client.base_url + "/docs")
+
+
+def cmd_register(args: argparse.Namespace) -> int:
+    client = _client(args)
+    email = (args.email or "").strip()
+    if not email:
+        try:
+            email = input("AgentGrid email (required): ").strip()
+        except EOFError as exc:
+            raise AgentGridError(0, "A real email is required.") from exc
+    if not email:
+        raise AgentGridError(0, "A real email is required.")
+
+    result = client.register(email=email, client_id=args.client_id or "")
+    client_id = str(result["client_id"])
+    pending_path = save_pending_client(client_id)
+    print("Registration created: " + client_id + " (tier: " + str(result.get("tier", "free")) + ")")
+    print("A 6-digit code was sent to that address. No API key exists yet.")
+    print("Check your inbox, then run: agrid verify <code>")
+    print("No code after a minute? Run: agrid resend")
+    print("Pending client ID saved at " + str(pending_path) + " (verify needs no --client-id).")
+    print()
+    print("Guide: " + client.base_url + "/guide")
+    print("API:   " + client.base_url + "/docs")
+    return 0
+
+
+def cmd_verify(args: argparse.Namespace) -> int:
+    client = _client(args)
+    client_id = (args.client_id or "").strip() or load_pending_client()
+    if not client_id:
+        raise AgentGridError(
+            0,
+            "No pending registration found. Run `agrid register` or pass --client-id.",
+        )
+    result = client.verify_email(client_id, args.code.strip())
+    path = save_api_key(result["api_key"])
+    clear_pending_client()
+    print("Email verified. API key stored at " + str(path) + " (not displayed).")
+    print("Save a backup of that key now; the service shows it only once.")
+    _next_steps(client)
+    return 0
+
+
+def cmd_resend(args: argparse.Namespace) -> int:
+    client = _client(args)
+    client_id = (args.client_id or "").strip() or load_pending_client()
+    if not client_id:
+        raise AgentGridError(
+            0,
+            "No pending registration found. Run `agrid register` or pass --client-id.",
+        )
+    client.resend_verification(client_id)
+    print("A fresh 6-digit code was sent. Run `agrid verify <code>` after it arrives.")
     return 0
 
 
@@ -143,12 +199,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    register = sub.add_parser("register", help="create a free client and store its API key")
+    register = sub.add_parser("register", help="create a free client after email verification")
     register.add_argument(
-        "--email", default=None, help="optional recovery email for payment Client ID fixes"
+        "--email", default=None, help="real email for the 6-digit human-verification code"
     )
     register.add_argument("--client-id", default=None, help=argparse.SUPPRESS)
     register.set_defaults(func=cmd_register)
+
+    verify = sub.add_parser("verify", help="confirm the emailed code and save your API key")
+    verify.add_argument("code", help="6-digit code from the AgentGrid verification email")
+    verify.add_argument(
+        "--client-id", default=None, help="override the pending client ID from `agrid register`"
+    )
+    verify.set_defaults(func=cmd_verify)
+
+    resend = sub.add_parser("resend", help="send a fresh verification code")
+    resend.add_argument(
+        "--client-id", default=None, help="override the pending client ID from `agrid register`"
+    )
+    resend.set_defaults(func=cmd_resend)
 
     login = sub.add_parser("login", help="store an API key locally")
     login.add_argument("--api-key", default=None, help="API key (prompted if omitted)")

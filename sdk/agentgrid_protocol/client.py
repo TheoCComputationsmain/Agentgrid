@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,12 +53,47 @@ def save_api_key(api_key: str, key_path: Optional[Path] = None) -> Path:
     path = Path(key_path) if key_path else default_key_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"api_key": api_key.strip()}) + "\n", encoding="utf-8")
+    _restrict(path)
+    return path
+
+
+def default_pending_path() -> Path:
+    return Path.home() / ".agentgrid" / "pending.json"
+
+
+def save_pending_client(client_id: str, pending_path: Optional[Path] = None) -> Path:
+    """Remember which unverified client the next `agrid verify` belongs to."""
+    path = Path(pending_path) if pending_path else default_pending_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"client_id": client_id.strip()}) + "\n", encoding="utf-8")
+    _restrict(path)
+    return path
+
+
+def load_pending_client(pending_path: Optional[Path] = None) -> Optional[str]:
+    path = Path(pending_path) if pending_path else default_pending_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8")).get("client_id", "").strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+def clear_pending_client(pending_path: Optional[Path] = None) -> None:
+    path = Path(pending_path) if pending_path else default_pending_path()
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _restrict(path: Path) -> None:
     try:
         path.chmod(0o600)
     except OSError:
         # Windows ignores this mode; the file still stays in the user profile.
         pass
-    return path
 
 
 def _http_transport(base_url: str) -> Transport:
@@ -157,20 +193,43 @@ class AgentGrid:
         return payload
 
     # --- Discovery and account -------------------------------------------------
-    def register(self, *, email: str = "", client_id: str = "") -> dict[str, Any]:
-        """Create a free client instantly and use its one-time key for this client.
+    def register(self, *, email: str, client_id: str = "") -> dict[str, Any]:
+        """Create an unverified client; the key is issued only after verification.
 
-        Registration is open self-service; no invite token is required. The
-        returned ``api_key`` is shown only once by the service.
+        Registration is open self-service; no invite token is required, but a
+        real email is. The service emails a 6-digit code and returns no
+        ``api_key`` here. Call :meth:`verify_email` with that code.
         """
-        body: dict[str, Any] = {}
+        if not email.strip():
+            raise AgentGridError(0, "A real email is required. Pass email='you@example.com'.")
+        body: dict[str, Any] = {"email": email.strip()}
         if client_id:
             body["client_id"] = client_id
-        if email:
-            body["email"] = email
-        result = self._request("POST", "/v1/clients/register", body, auth=False)
+        return self._request("POST", "/v1/clients/register", body, auth=False)
+
+    def verify_email(self, client_id: str, code: str) -> dict[str, Any]:
+        """Confirm the emailed code; the returned key becomes this client's key."""
+        if not client_id or not re.fullmatch(r"\d{6}", code or ""):
+            raise AgentGridError(0, "client_id and a 6-digit code are required.")
+        result = self._request(
+            "POST",
+            "/v1/clients/verify-email",
+            {"client_id": client_id, "code": code},
+            auth=False,
+        )
         self.api_key = result["api_key"]
         return result
+
+    def resend_verification(self, client_id: str) -> dict[str, Any]:
+        """Request a fresh code for an unverified client (60-second cooldown)."""
+        if not client_id:
+            raise AgentGridError(0, "client_id is required.")
+        return self._request(
+            "POST",
+            "/v1/clients/resend-verification",
+            {"client_id": client_id},
+            auth=False,
+        )
 
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/health/ready", auth=False)

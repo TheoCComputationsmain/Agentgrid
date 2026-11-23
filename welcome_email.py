@@ -190,13 +190,59 @@ If you paid for a tier, register with the same email you paid with and enter thi
     }
 
 
-async def send_welcome_email(email: str, client_id: str, base_url: str = "") -> bool:
-    """Dispatch the welcome message. Returns False when disabled or on failure."""
+def build_verification_message(client_id: str, code: str, base_url: str = "") -> dict[str, str]:
+    """Build the human-verification message. Never includes an API key."""
+    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    safe_id = html.escape(client_id)
+    safe_code = html.escape(code)
+    safe_base = html.escape(base)
+
+    text = f"""Hi,
+
+Someone registered an AgentGrid client with this email.
+
+Client ID: {client_id}
+Verification code: {code}
+
+The code expires in 15 minutes. Run:
+
+    agrid verify {code}
+
+Your API key is created only after this step, so the account cannot be used
+until you confirm you control this inbox. If you did not register, ignore this
+email — no key exists and no action is needed.
+
+Guide: {base}/guide
+
+— Theo, AgentGrid
+"""
+
+    html_body = f"""<div style="font:15px/1.6 system-ui;color:#eaf0ff;background:#0b1020;padding:20px">
+<h2>Confirm your AgentGrid registration</h2>
+<p>Client ID: <code>{safe_id}</code></p>
+<p>Your verification code is
+<strong style="font-size:22px;letter-spacing:3px">{safe_code}</strong></p>
+<p>The code expires in 15 minutes. Run <code>agrid verify {safe_code}</code>
+to create your API key. Until then the account cannot be used.</p>
+<p>If you did not register, ignore this email — no key exists.</p>
+<p><a href="{safe_base}/guide" style="color:#7ee7c7">Developer guide</a></p>
+<p>— Theo, AgentGrid</p>
+</div>"""
+
+    return {
+        "type": "agentgrid.verify",
+        "client_id": client_id,
+        "subject": "Your AgentGrid verification code",
+        "text": text,
+        "html": html_body,
+    }
+
+
+async def _dispatch(email: str, message: dict[str, str]) -> bool:
+    """Send a prepared message through the configured provider."""
     recipient = (email or "").strip().lower()
     if not recipient:
         return False
-
-    message = build_message(client_id, base_url)
 
     webhook_url = _env(WEBHOOK_URL_ENV)
     if webhook_url:
@@ -270,3 +316,15 @@ async def send_welcome_email(email: str, client_id: str, base_url: str = "") -> 
                 return False
 
     return False
+
+
+async def send_welcome_email(email: str, client_id: str, base_url: str = "") -> bool:
+    """Dispatch the three-step welcome message after verification."""
+    return await _dispatch(email, build_message(client_id, base_url))
+
+
+async def send_verification_email(
+    email: str, client_id: str, code: str, base_url: str = ""
+) -> bool:
+    """Dispatch the one-time human-verification code."""
+    return await _dispatch(email, build_verification_message(client_id, code, base_url))

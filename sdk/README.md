@@ -12,21 +12,24 @@ verification, and receipt/statement reads against the live service.
 pip install theoc-agentgrid-protocol
 ```
 
-## One-command quickstart
+## Quickstart: register, verify, handoff
 
-Registration is open self-service — no invite token, no operator approval:
+Registration is open self-service — no invite token, no operator approval — but a
+real email is required to prove the signup is from a reachable human:
 
 ```bash
-agrid register --email you@example.com   # creates a free client, stores the key locally
+agrid register --email you@example.com   # sends a 6-digit code; no key yet
+agrid verify 123456                      # code from your inbox; saves the key
 agrid quickstart                         # real agents, real signed handoff, real receipt
 ```
 
-`agrid register` prints only the Client ID and tier; the one-time `agk_...` key is
-stored under `~/.agentgrid/credentials.json` and never displayed. Save a backup
-of that key when you first get it. The `--email` flag is optional but recommended:
-it lets the operator recover the right Client ID if you mistype it on a payment
-form. If you already have a key, use `agrid login` instead. `agrid quickstart`
-prompts for a key if neither command was run.
+`agrid register` prints only the Client ID and tier. We send a 6-digit code to
+the address; no `agk_...` key exists until `agrid verify` confirms it. The key is
+then stored under `~/.agentgrid/credentials.json`, never displayed, and should be
+backed up. The same email lets the operator recover a mistyped Client ID on a
+payment form. If the code expires, run `agrid resend` (60-second cooldown). If you
+already have a key, use `agrid login`. `agrid quickstart` prompts for a key if
+neither command was run.
 
 Expected output:
 
@@ -44,7 +47,9 @@ Done. Open the card at https://agentgrid-pied.vercel.app/a/ag_...
 Other commands:
 
 ```bash
-agrid register                   # create a free client (see above)
+agrid register                   # create an unverified client (prompts for email)
+agrid verify <code>              # confirm the emailed code and save your key
+agrid resend                     # request a fresh code if the first expired
 agrid login                      # store an API key you already have
 agrid doctor                     # service, database, and account status
 agrid statement                  # current invoice and hard caps
@@ -59,8 +64,9 @@ from agentgrid_protocol import AgentGrid
 
 ag = AgentGrid()                 # reads AGENTGRID_API_KEY or ~/.agentgrid/credentials.json
 
-# Or register a free client right from Python:
-# me = ag.register(email="you@example.com")
+# Or register and verify a free client right from Python:
+# pending = ag.register(email="you@example.com")   # no api_key yet
+# me = ag.verify_email(pending["client_id"], "123456")  # now ag.api_key is set
 
 planner = ag.create_agent("Planner", capabilities=["plan"])
 worker = ag.create_agent("Worker", capabilities=["read"])
