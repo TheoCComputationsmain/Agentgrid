@@ -209,12 +209,13 @@ class AgentGrid:
 
     def verify_email(self, client_id: str, code: str) -> dict[str, Any]:
         """Confirm the emailed code; the returned key becomes this client's key."""
-        if not client_id or not re.fullmatch(r"\d{6}", code or ""):
+        normalized = str(code or "")
+        if not client_id or not re.fullmatch(r"\d{6}", normalized):
             raise AgentGridError(0, "client_id and a 6-digit code are required.")
         result = self._request(
             "POST",
             "/v1/clients/verify-email",
-            {"client_id": client_id, "code": code},
+            {"client_id": client_id, "code": normalized},
             auth=False,
         )
         self.api_key = result["api_key"]
