@@ -159,7 +159,7 @@ API:   {base}/docs
 
 If you paid for a tier, register with the same email you paid with and enter this exact Client ID on the payment form.
 
-— Theo, AgentGrid
+— TheoC Computations, AgentGrid
 """
 
     html_body = f"""<div style="font:15px/1.6 system-ui;color:#eaf0ff;background:#0b1020;padding:20px">
@@ -178,7 +178,7 @@ If you paid for a tier, register with the same email you paid with and enter thi
 <p><a href="{safe_base}/guide" style="color:#7ee7c7">Developer guide</a> &middot;
 <a href="{safe_base}/docs" style="color:#7ee7c7">API reference</a></p>
 <p>If you paid for a tier, use this same email and enter your exact Client ID on the payment form.</p>
-<p>— Theo, AgentGrid</p>
+<p>— TheoC Computations, AgentGrid</p>
 </div>"""
 
     return {
@@ -214,7 +214,7 @@ email — no key exists and no action is needed.
 
 Guide: {base}/guide
 
-— Theo, AgentGrid
+— TheoC Computations, AgentGrid
 """
 
     html_body = f"""<div style="font:15px/1.6 system-ui;color:#eaf0ff;background:#0b1020;padding:20px">
@@ -226,7 +226,7 @@ Guide: {base}/guide
 to create your API key. Until then the account cannot be used.</p>
 <p>If you did not register, ignore this email — no key exists.</p>
 <p><a href="{safe_base}/guide" style="color:#7ee7c7">Developer guide</a></p>
-<p>— Theo, AgentGrid</p>
+<p>— TheoC Computations, AgentGrid</p>
 </div>"""
 
     return {

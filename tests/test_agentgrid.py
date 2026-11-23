@@ -1190,6 +1190,8 @@ def test_verification_and_welcome_emails_via_webhook(api, monkeypatch):
     assert verify_payload["type"] == "agentgrid.verify"
     assert "verification code" in verify_payload["subject"]
     assert registered.json()["verification_code"] in verify_payload["text"]
+    assert "TheoC Computations, AgentGrid" in verify_payload["text"]
+    assert "TheoC Computations, AgentGrid" in verify_payload["html"]
 
     captured.clear()
     response = api.post(
@@ -1209,6 +1211,8 @@ def test_verification_and_welcome_emails_via_webhook(api, monkeypatch):
     for step in ("agrid quickstart", "agrid card", "agrid receipts"):
         assert step in payload["text"]
         assert step in payload["html"]
+    assert "TheoC Computations, AgentGrid" in payload["text"]
+    assert "TheoC Computations, AgentGrid" in payload["html"]
     api_key = response.json()["api_key"]
     assert api_key not in payload["text"]
     assert api_key not in payload["html"]
