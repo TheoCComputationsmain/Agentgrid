@@ -1,12 +1,19 @@
-"""Best-effort onboarding email delivered through a user-owned outbound webhook.
+"""Best-effort onboarding email with three provider options.
 
-AgentGrid holds no email-provider credentials and sends no money-related data.
-Set ``AGENTGRID_WELCOME_EMAIL_WEBHOOK_URL`` to an HTTPS endpoint you control;
-AgentGrid POSTs a small JSON payload and that endpoint sends the real email
-(Resend, Postmark, Make, n8n, or your own bridge all work).
+AgentGrid never stores email-provider credentials in code or the repo. Set ONE
+of these in the Vercel project environment:
 
-The send is deliberately non-fatal: registration succeeds even if the webhook
-is slow, misconfigured, or down.
+1. ``AGENTGRID_WELCOME_EMAIL_WEBHOOK_URL`` — POST JSON to an endpoint you own
+   (Resend bridge, Make, n8n, operator-automation, etc.).
+2. ``AGENTGRID_WELCOME_EMAIL_API_KEY`` + ``AGENTGRID_WELCOME_FROM_EMAIL`` —
+   send directly through Resend's HTTPS API.
+3. ``AGENTGRID_WELCOME_EMAIL_SMTP_HOST``, ``..._SMTP_PORT``, ``..._SMTP_USER``,
+   ``..._SMTP_PASSWORD`` + ``AGENTGRID_WELCOME_FROM_EMAIL`` — send via SMTP
+   (e.g. a Gmail app password). Used only if 1 and 2 are not configured.
+
+Every mode is best-effort: a 5-second timeout, failures logged by type only,
+and registration never fails because email failed. No API key is ever included
+in the message.
 """
 from __future__ import annotations
 
@@ -15,6 +22,9 @@ import html
 import json
 import logging
 import os
+import smtplib
+import ssl
+from email.message import EmailMessage
 from typing import Any, Callable
 from urllib.request import Request, urlopen
 
@@ -22,7 +32,15 @@ logger = logging.getLogger("agentgrid.welcome_email")
 
 WEBHOOK_URL_ENV = "AGENTGRID_WELCOME_EMAIL_WEBHOOK_URL"
 WEBHOOK_TOKEN_ENV = "AGENTGRID_WELCOME_EMAIL_WEBHOOK_TOKEN"
+RESEND_KEY_ENV = "AGENTGRID_WELCOME_EMAIL_API_KEY"
+FROM_ENV = "AGENTGRID_WELCOME_FROM_EMAIL"
+SMTP_HOST_ENV = "AGENTGRID_WELCOME_EMAIL_SMTP_HOST"
+SMTP_PORT_ENV = "AGENTGRID_WELCOME_EMAIL_SMTP_PORT"
+SMTP_USER_ENV = "AGENTGRID_WELCOME_EMAIL_SMTP_USER"
+SMTP_PASSWORD_ENV = "AGENTGRID_WELCOME_EMAIL_SMTP_PASSWORD"
+
 DEFAULT_BASE_URL = "https://agentgrid-pied.vercel.app"
+RESEND_API_URL = "https://api.resend.com/emails"
 
 WebhookPoster = Callable[[str, dict[str, Any], str], None]
 
@@ -42,13 +60,56 @@ def _default_poster(url: str, payload: dict[str, Any], token: str) -> None:
             raise RuntimeError(f"webhook returned HTTP {response.status}")
 
 
-# Module-level so tests can replace it without any network access.
+def _resend_poster(payload: dict[str, Any], api_key: str) -> None:
+    request = Request(
+        RESEND_API_URL,
+        data=json.dumps(payload).encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": "Bearer " + api_key,
+        },
+    )
+    with urlopen(request, timeout=5) as response:
+        if response.status >= 400:
+            raise RuntimeError(f"resend returned HTTP {response.status}")
+
+
+def _smtp_poster(message: EmailMessage, host: str, port: int, user: str, password: str) -> None:
+    context = ssl.create_default_context()
+    if port == 465:
+        with smtplib.SMTP_SSL(host, port, timeout=5, context=context) as server:
+            server.login(user, password)
+            server.send_message(message)
+    else:
+        with smtplib.SMTP(host, port, timeout=5) as server:
+            server.starttls(context=context)
+            server.login(user, password)
+            server.send_message(message)
+
+
+# Module level so tests can replace these without any network access.
 _poster: WebhookPoster = _default_poster
+_resend_send: Callable[[dict[str, Any], str], None] = _resend_poster
+_smtp_send: Callable[[EmailMessage, str, int, str, str], None] = _smtp_poster
+
+
+def _env(name: str) -> str:
+    return os.environ.get(name, "").strip()
 
 
 def is_configured() -> bool:
-    """True when an outbound welcome-email webhook has been configured."""
-    return bool(os.environ.get(WEBHOOK_URL_ENV, "").strip())
+    """True when any delivery mode has been configured."""
+    return bool(
+        _env(WEBHOOK_URL_ENV)
+        or (_env(RESEND_KEY_ENV) and _env(FROM_ENV))
+        or (
+            _env(SMTP_HOST_ENV)
+            and _env(SMTP_USER_ENV)
+            and _env(SMTP_PASSWORD_ENV)
+            and _env(FROM_ENV)
+        )
+    )
 
 
 def build_message(client_id: str, base_url: str = "") -> dict[str, str]:
@@ -114,18 +175,62 @@ If you paid for a tier, register with the same email you paid with and enter thi
 
 
 async def send_welcome_email(email: str, client_id: str, base_url: str = "") -> bool:
-    """Dispatch the welcome payload. Returns False when disabled or on failure."""
+    """Dispatch the welcome message. Returns False when disabled or on failure."""
     recipient = (email or "").strip().lower()
-    if not recipient or not is_configured():
+    if not recipient:
         return False
 
-    url = os.environ[WEBHOOK_URL_ENV].strip()
-    token = os.environ.get(WEBHOOK_TOKEN_ENV, "").strip()
-    payload: dict[str, Any] = {"to": recipient, **build_message(client_id, base_url)}
+    message = build_message(client_id, base_url)
 
-    try:
-        await asyncio.to_thread(_poster, url, payload, token)
-        return True
-    except Exception as exc:  # noqa: BLE001 - onboarding must never break registration
-        logger.warning("Welcome email dispatch failed (%s)", type(exc).__name__)
-        return False
+    webhook_url = _env(WEBHOOK_URL_ENV)
+    if webhook_url:
+        payload: dict[str, Any] = {"to": recipient, **message}
+        token = _env(WEBHOOK_TOKEN_ENV)
+        try:
+            await asyncio.to_thread(_poster, webhook_url, payload, token)
+            return True
+        except Exception as exc:  # noqa: BLE001 - onboarding must never break registration
+            logger.warning("Welcome email webhook failed (%s)", type(exc).__name__)
+            return False
+
+    api_key = _env(RESEND_KEY_ENV)
+    sender = _env(FROM_ENV)
+    if api_key and sender:
+        payload = {
+            "from": sender,
+            "to": [recipient],
+            "subject": message["subject"],
+            "text": message["text"],
+            "html": message["html"],
+        }
+        try:
+            await asyncio.to_thread(_resend_send, payload, api_key)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Welcome email API failed (%s)", type(exc).__name__)
+            return False
+
+    smtp_host = _env(SMTP_HOST_ENV)
+    smtp_user = _env(SMTP_USER_ENV)
+    smtp_password = _env(SMTP_PASSWORD_ENV)
+    if smtp_host and smtp_user and smtp_password and sender:
+        try:
+            port = int(_env(SMTP_PORT_ENV) or "465")
+        except ValueError:
+            port = 465
+        mail = EmailMessage()
+        mail["Subject"] = message["subject"]
+        mail["From"] = sender
+        mail["To"] = recipient
+        mail.set_content(message["text"])
+        mail.add_alternative(message["html"], subtype="html")
+        try:
+            await asyncio.to_thread(
+                _smtp_send, mail, smtp_host, port, smtp_user, smtp_password
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Welcome email SMTP failed (%s)", type(exc).__name__)
+            return False
+
+    return False

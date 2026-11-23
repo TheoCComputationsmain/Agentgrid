@@ -69,16 +69,25 @@ registration token.
 
 ## Welcome email (optional)
 
-Set `AGENTGRID_WELCOME_EMAIL_WEBHOOK_URL` to an HTTPS endpoint you control. On
-every successful registration AgentGrid POSTs
-`{to, client_id, type, subject, text, html}` with the three onboarding steps.
-Optionally set `AGENTGRID_WELCOME_EMAIL_WEBHOOK_TOKEN` to have a bearer token
-forwarded to that endpoint. The webhook timeout is 5 seconds and any failure is
-logged by type only — registration never fails because email failed.
+On every successful registration AgentGrid sends a three-step welcome message.
+Configure exactly ONE delivery mode in the Vercel dashboard. All timeouts are
+5 seconds and any failure is logged by exception type only — registration never
+fails because email failed.
 
-AgentGrid stores no email-provider credentials and never sees payment details.
-Point the URL at your own Resend/Postmark bridge, Make, n8n, or equivalent; keep
-that provider's keys there. With no URL set, no email is sent.
+1. **Your own webhook (recommended if you already run the operator bridge):**
+   `AGENTGRID_WELCOME_EMAIL_WEBHOOK_URL` receives
+   `{to, client_id, type, subject, text, html}`. Optionally set
+   `AGENTGRID_WELCOME_EMAIL_WEBHOOK_TOKEN` for a bearer token.
+2. **Resend directly:** `AGENTGRID_WELCOME_EMAIL_API_KEY` and
+   `AGENTGRID_WELCOME_FROM_EMAIL`. Resend may require a verified sending domain
+   before it will deliver to arbitrary recipients.
+3. **SMTP:** `AGENTGRID_WELCOME_EMAIL_SMTP_HOST`, `..._PORT` (default 465),
+   `..._USER`, `..._PASSWORD`, and `AGENTGRID_WELCOME_FROM_EMAIL`. A Gmail app
+   password works here and needs no domain verification.
+
+AgentGrid stores no email-provider credentials in code or the repo, and never
+sees payment details. With none of these set, no email is sent and nothing
+breaks.
 
 ## Verify a deployment
 

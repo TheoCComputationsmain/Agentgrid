@@ -1103,6 +1103,8 @@ def test_welcome_email_disabled_without_webhook(api, monkeypatch):
     import welcome_email
 
     monkeypatch.delenv(welcome_email.WEBHOOK_URL_ENV, raising=False)
+    monkeypatch.delenv(welcome_email.RESEND_KEY_ENV, raising=False)
+    monkeypatch.delenv(welcome_email.SMTP_HOST_ENV, raising=False)
     captured: list[tuple] = []
     monkeypatch.setattr(welcome_email, "_poster", lambda *args: captured.append(args))
     cid = "nowelcome_" + uuid.uuid4().hex[:10]
@@ -1111,3 +1113,61 @@ def test_welcome_email_disabled_without_webhook(api, monkeypatch):
     )
     assert response.status_code == 201, response.text
     assert captured == []
+
+
+def test_welcome_email_uses_resend_when_configured(api, monkeypatch):
+    import welcome_email
+
+    monkeypatch.delenv(welcome_email.WEBHOOK_URL_ENV, raising=False)
+    monkeypatch.setenv(welcome_email.RESEND_KEY_ENV, "re_test_key")
+    monkeypatch.setenv(welcome_email.FROM_ENV, "AgentGrid <hello@example.com>")
+    captured: list[tuple] = []
+    monkeypatch.setattr(
+        welcome_email,
+        "_resend_send",
+        lambda payload, key: captured.append((payload, key)),
+    )
+
+    cid = "resend_" + uuid.uuid4().hex[:10]
+    response = api.post(
+        "/v1/clients/register", json={"client_id": cid, "email": "Buyer@Example.com"}
+    )
+    assert response.status_code == 201, response.text
+    assert len(captured) == 1
+    payload, key = captured[0]
+    assert key == "re_test_key"
+    assert payload["from"] == "AgentGrid <hello@example.com>"
+    assert payload["to"] == ["buyer@example.com"]
+    assert "3 steps" in payload["subject"]
+    assert response.json()["api_key"] not in payload["text"]
+    assert response.json()["api_key"] not in payload["html"]
+
+
+def test_welcome_email_uses_smtp_when_configured(api, monkeypatch):
+    import welcome_email
+
+    monkeypatch.delenv(welcome_email.WEBHOOK_URL_ENV, raising=False)
+    monkeypatch.delenv(welcome_email.RESEND_KEY_ENV, raising=False)
+    monkeypatch.setenv(welcome_email.SMTP_HOST_ENV, "smtp.example.com")
+    monkeypatch.setenv(welcome_email.SMTP_PORT_ENV, "465")
+    monkeypatch.setenv(welcome_email.SMTP_USER_ENV, "sender@example.com")
+    monkeypatch.setenv(welcome_email.SMTP_PASSWORD_ENV, "not-a-real-password")
+    monkeypatch.setenv(welcome_email.FROM_ENV, "AgentGrid <sender@example.com>")
+    captured: list[tuple] = []
+    monkeypatch.setattr(welcome_email, "_smtp_send", lambda *args: captured.append(args))
+
+    cid = "smtp_" + uuid.uuid4().hex[:10]
+    response = api.post(
+        "/v1/clients/register", json={"client_id": cid, "email": "SMTP.User@Example.com"}
+    )
+    assert response.status_code == 201, response.text
+    assert len(captured) == 1
+    mail, host, port, user, password = captured[0]
+    assert mail["To"] == "smtp.user@example.com"
+    assert "3 steps" in mail["Subject"]
+    assert (host, port, user, password) == (
+        "smtp.example.com",
+        465,
+        "sender@example.com",
+        "not-a-real-password",
+    )
