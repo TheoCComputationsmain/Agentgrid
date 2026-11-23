@@ -16,7 +16,7 @@ from .client import (
 )
 from .crypto import AgentKey, b64d, b64e, canonical, task_digest, unsigned_card
 
-__version__ = "0.2.3"
+__version__ = "0.2.4"
 __all__ = [
     "DEFAULT_BASE_URL",
     "Agent",

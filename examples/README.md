@@ -1,28 +1,43 @@
 # AgentGrid examples
 
-## Your first verified handoff
+## Plug-and-play framework handoff
 
-`quickstart.py` registers two agents, verifies a signed Agent Card online and
-offline, signs a handoff, and reads the immutable receipt. It uses only the
-standard library plus `cryptography` — no SDK required.
-
-### 1. Get an API key
-
-Registration is open self-service:
+`langgraph_handoff.py` shows the exact node to paste into a LangGraph, CrewAI, or
+OpenAI Agents SDK project. It creates a planner and worker, signs a scoped
+handoff with `planner.handoff_to(worker, ...)`, and prints the immutable receipt.
+LangGraph is optional: without it installed, the same node runs directly.
 
 ```bash
 pip install theoc-agentgrid-protocol
-agrid register --email you@example.com
+export AGENTGRID_API_KEY=agk_your_key_here   # or set it in PowerShell
+python examples/langgraph_handoff.py
 ```
 
-Or use the hosted service's API directly with `POST /v1/clients/register`.
-The returned `agk_...` key is shown only once. If you already have one, skip this.
+The file docstring includes the CrewAI and OpenAI Agents SDK adaptations. Use
+`AGENTGRID_TASK` to change the delegated task.
+
+## Your first verified handoff
+
+`quickstart.py` registers two agents, verifies a signed Agent Card online and
+offline, signs a handoff, and reads the immutable receipt. It is the fastest way
+to see what AgentGrid actually does.
+
+### 1. Get an API key
+
+Ask the operator to register a client for you. They will give you a key that
+starts with `agk_`. The key is shown only once, so store it somewhere safe. On the operator's own
+machine, `quickstart.py` also loads a key from `examples/.dev_api_key`
+automatically if no environment variable is set.
 
 ### 2. Set up
+
+From the AgentGrid folder:
 
 ```bash
 pip install -r requirements-local.txt
 ```
+
+Then set two environment variables:
 
 ```powershell
 # Windows PowerShell

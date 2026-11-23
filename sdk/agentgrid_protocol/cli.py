@@ -66,6 +66,7 @@ def cmd_register(args: argparse.Namespace) -> int:
     print("Registration created: " + client_id + " (tier: " + str(result.get("tier", "free")) + ")")
     print("A 6-digit code was sent to that address. No API key exists yet.")
     print("Check your inbox, then run: agrid verify <code>")
+    print("Verification runs your first signed handoff automatically.")
     print("No code after a minute? Run: agrid resend")
     print("Pending client ID saved at " + str(pending_path) + " (verify needs no --client-id).")
     print()
@@ -87,7 +88,20 @@ def cmd_verify(args: argparse.Namespace) -> int:
     clear_pending_client()
     print("Email verified. API key stored at " + str(path) + " (not displayed).")
     print("Save a backup of that key now; the service shows it only once.")
-    _next_steps(client)
+
+    if getattr(args, "no_quickstart", False):
+        _next_steps(client)
+        return 0
+
+    print("\nRunning your first signed handoff now...")
+    try:
+        _print_quickstart_result(client, client.quickstart())
+    except Exception as exc:
+        # A failed demo must never turn a successful verification into a failure.
+        detail = getattr(exc, "detail", str(exc))
+        print("Quickstart could not run automatically: " + str(detail))
+        print("Retry any time with: agrid quickstart")
+        _next_steps(client)
     return 0
 
 
@@ -124,10 +138,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_quickstart(args: argparse.Namespace) -> int:
-    _require_key(args)
-    client = _client(args)
-    result = client.quickstart()
+def _print_quickstart_result(client: AgentGrid, result: dict) -> None:
     from_agent = result["from_agent"]
     to_agent = result["to_agent"]
     verification = result["verification"]
@@ -140,6 +151,14 @@ def cmd_quickstart(args: argparse.Namespace) -> int:
     print(f"3. Signed handoff accepted: {result['receipt']['handoff_id']}")
     print(f"4. Receipts for worker: {result['receipt_count']}")
     print("\nDone. Open the card at " + from_agent.card_url)
+    print("Next: agrid card " + from_agent.agent_id)
+    print("      agrid receipts " + to_agent.agent_id)
+
+
+def cmd_quickstart(args: argparse.Namespace) -> int:
+    _require_key(args)
+    client = _client(args)
+    _print_quickstart_result(client, client.quickstart())
     return 0
 
 
@@ -210,6 +229,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("code", help="6-digit code from the AgentGrid verification email")
     verify.add_argument(
         "--client-id", default=None, help="override the pending client ID from `agrid register`"
+    )
+    verify.add_argument(
+        "--no-quickstart",
+        action="store_true",
+        help="skip the automatic first handoff after verification",
     )
     verify.set_defaults(func=cmd_verify)
 

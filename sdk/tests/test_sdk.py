@@ -227,6 +227,7 @@ def test_cli_register_prints_verify_step_and_stores_no_key(monkeypatch, capsys):
     assert saved == {}
     assert "No API key exists yet" in output
     assert "agrid verify" in output
+    assert "Verification runs your first signed handoff automatically" in output
     assert "agrid resend" in output
     assert "/guide" in output
     assert "/docs" in output
@@ -236,6 +237,11 @@ def test_cli_verify_saves_key_and_clears_pending(monkeypatch, capsys):
     saved: dict[str, str] = {}
     cleared: list[bool] = []
 
+    class Obj:
+        def __init__(self, agent_id):
+            self.agent_id = agent_id
+            self.card_url = "https://agentgrid-pied.vercel.app/a/" + agent_id
+
     class Fake:
         base_url = "https://agentgrid-pied.vercel.app"
 
@@ -243,6 +249,15 @@ def test_cli_verify_saves_key_and_clears_pending(monkeypatch, capsys):
             assert client_id == "cli_cli123"
             assert code == "123456"
             return {"api_key": "agk_verified_secret", "tier": "free"}
+
+        def quickstart(self):
+            return {
+                "from_agent": Obj("ag_planner"),
+                "to_agent": Obj("ag_worker"),
+                "verification": {"online": True, "offline": True},
+                "receipt": {"handoff_id": "h_verify_test"},
+                "receipt_count": 1,
+            }
 
     monkeypatch.setattr(cli, "AgentGrid", lambda **kwargs: Fake())
     monkeypatch.setattr(cli, "load_pending_client", lambda: "cli_cli123")
@@ -259,9 +274,32 @@ def test_cli_verify_saves_key_and_clears_pending(monkeypatch, capsys):
     assert "agk_verified_secret" not in output
     assert cleared == [True]
     assert "Email verified" in output
+    assert "Running your first signed handoff now" in output
+    assert "h_verify_test" in output
+    assert "ag_planner -> ag_worker" in output
+    assert "agrid receipts ag_worker" in output
+    assert "agk_verified_secret" not in output
+
+
+def test_cli_verify_no_quickstart_keeps_manual_next_steps(monkeypatch, capsys):
+    class Fake:
+        base_url = "https://agentgrid-pied.vercel.app"
+
+        def verify_email(self, client_id, code):
+            return {"api_key": "agk_manual", "tier": "free"}
+
+        def quickstart(self):
+            raise AssertionError("quickstart must not run with --no-quickstart")
+
+    monkeypatch.setattr(cli, "AgentGrid", lambda **kwargs: Fake())
+    monkeypatch.setattr(cli, "load_pending_client", lambda: "cli_cli123")
+    monkeypatch.setattr(cli, "save_api_key", lambda key: "creds.json")
+    monkeypatch.setattr(cli, "clear_pending_client", lambda: None)
+
+    assert cli.main(["verify", "123456", "--no-quickstart"]) == 0
+    output = capsys.readouterr().out
     assert "three steps to your first signed handoff" in output
-    for step in ("agrid quickstart", "agrid card <agent_id>", "agrid receipts <agent_id>"):
-        assert step in output
+    assert "agrid quickstart" in output
 
 
 def test_cli_resend_uses_pending_client(monkeypatch, capsys):

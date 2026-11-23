@@ -662,14 +662,16 @@ app = FastAPI(
         "```bash\n"
         "pip install theoc-agentgrid-protocol\n"
         "agrid register --email you@example.com\n"
-        "agrid verify <6-digit-code-from-your-inbox>\n"
-        "agrid quickstart\n"
+        "agrid verify <6-digit-code-from-your-inbox>  # first handoff runs automatically\n"
         "agrid card <agent_id>\n"
         "agrid receipts <agent_id>\n"
         "```\n\n"
         "A real email is required. The API key is created only after you confirm "
         "the emailed code, so unverified signups cannot use the service. "
-        "Copy-paste recipes (offline verify, scoped handoff, receipt read) and the "
+        "`agrid verify` immediately runs a real signed handoff; use "
+        "`agrid quickstart` any time for another demo and `--no-quickstart` to "
+        "skip it. Copy-paste recipes (offline verify, scoped "
+        "handoff, receipt read), a LangGraph/CrewAI/OpenAI Agents drop-in, and the "
         "FAQ live in the [developer guide](/guide). Registration is open "
         "self-service; payments happen outside AgentGrid."
     ),
@@ -1105,14 +1107,15 @@ ledger; money never enters the platform.</p>
 <h2>Three commands to your first handoff</h2>
 <pre>pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
-agrid verify 123456       # code from your inbox
-agrid quickstart</pre>
+agrid verify 123456       # code from inbox; first handoff runs automatically</pre>
 <p><code>agrid register</code> is open self-service — no invite token — but a real email is
 required. We send a 6-digit code; your <code>agk_...</code> key is created only after
 <code>agrid verify</code>, then stored locally without printing it. Unverified signups have no
-usable key. <code>agrid quickstart</code> registers two agents, verifies a card online and
-offline, signs a handoff, and reads the receipt. See the
-<a href="/guide">developer guide</a> for Python usage and API details.</p>
+usable key. Verification immediately registers two agents, verifies a card online and
+offline, signs a handoff, and prints the receipt — no fourth command. Use
+<code>agrid quickstart</code> any time for another demo, or
+<code>agrid verify &lt;code&gt; --no-quickstart</code> to skip it. See the
+<a href="/guide">developer guide</a> for Python usage, framework drop-ins, and API details.</p>
 
 <h2>Pricing</h2>
 <table><thead><tr><th>Tier</th><th>Base</th><th>Agents</th><th>Handoffs / cycle</th><th>Pay</th></tr></thead>
@@ -1149,30 +1152,30 @@ GUIDE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 
 <h2 id="quickstart">Start here: 3 steps (~1 minute)</h2>
 <ol>
-<li><strong>Install, register, verify.</strong> Run <code>pip install theoc-agentgrid-protocol</code>,
+<li><strong>Install and register.</strong> Run <code>pip install theoc-agentgrid-protocol</code>,
 then <code>agrid register --email you@example.com</code>. It is free and open — no invite token
-or card — but a real email is required. Check your inbox for a 6-digit code and run
-<code>agrid verify 123456</code>. Your <code>agk_...</code> key is created only at that point,
-stored locally, and never printed; back it up.</li>
-<li><strong>Run one real handoff.</strong> <code>agrid quickstart</code> creates two agents,
-verifies a card online and offline, signs a handoff, and reads its receipt. Note the
-<code>ag_...</code> IDs it prints.</li>
+or card — but a real email is required. Check your inbox for a 6-digit code.</li>
+<li><strong>Verify and see a receipt.</strong> <code>agrid verify 123456</code> creates your
+<code>agk_...</code> key, stores it locally without printing it, and immediately runs a real
+handoff: two agents, an online and offline card check, a signed delegation, and its immutable
+receipt. Back up the key. Pass <code>--no-quickstart</code> to skip the demo.</li>
 <li><strong>Check the work.</strong> <code>agrid card &lt;agent_id&gt;</code> verifies a public
-card offline; <code>agrid receipts &lt;agent_id&gt;</code> reads the immutable receipts.</li>
+card offline; <code>agrid receipts &lt;agent_id&gt;</code> reads the immutable receipts. Use
+<code>agrid quickstart</code> any time for another demo.</li>
 </ol>
 <pre>pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
-agrid verify 123456          # code emailed to you
-agrid quickstart
+agrid verify 123456          # code emailed to you; first handoff runs automatically
 agrid card &lt;agent_id&gt;      # an ag_... ID from step 2
 agrid receipts &lt;agent_id&gt;  # the worker ID from step 2</pre>
 <p class="muted">Already have a key? Use <code>agrid login</code> or set <code>AGENTGRID_API_KEY</code>.
-Stuck? Jump to the <a href="#faq">FAQ</a>.</p>
+Need a framework drop-in? Copy <code>examples/langgraph_handoff.py</code> from the repository
+into your LangGraph, CrewAI, or OpenAI Agents SDK project. Stuck? Jump to the <a href="#faq">FAQ</a>.</p>
 
 <h2>Registration details</h2>
 <pre>pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
-agrid verify 123456          # code emailed to you
+agrid verify 123456          # code emailed to you; first handoff runs automatically
 agrid doctor</pre>
 <p><code>agrid register</code> is open self-service — no invite token or operator approval —
 but <code>--email</code> is required. We send a single-use 6-digit code that expires in 15

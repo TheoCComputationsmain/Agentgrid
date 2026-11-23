@@ -19,17 +19,16 @@ real email is required to prove the signup is from a reachable human:
 
 ```bash
 agrid register --email you@example.com   # sends a 6-digit code; no key yet
-agrid verify 123456                      # code from your inbox; saves the key
-agrid quickstart                         # real agents, real signed handoff, real receipt
+agrid verify 123456                      # code from inbox; key + first handoff happen here
 ```
 
 `agrid register` prints only the Client ID and tier. We send a 6-digit code to
 the address; no `agk_...` key exists until `agrid verify` confirms it. The key is
 then stored under `~/.agentgrid/credentials.json`, never displayed, and should be
-backed up. The same email lets the operator recover a mistyped Client ID on a
-payment form. If the code expires, run `agrid resend` (60-second cooldown). If you
-already have a key, use `agrid login`. `agrid quickstart` prompts for a key if
-neither command was run.
+backed up. Verification immediately runs a real signed handoff and prints the
+receipt, so there is no fourth command. Pass `--no-quickstart` to skip it, or run
+`agrid quickstart` later for another demo. If the code expires, run `agrid resend`
+(60-second cooldown). If you already have a key, use `agrid login`.
 
 Expected output:
 
@@ -48,7 +47,8 @@ Other commands:
 
 ```bash
 agrid register                   # create an unverified client (prompts for email)
-agrid verify <code>              # confirm the emailed code and save your key
+agrid verify <code>              # confirm code, save key, run first handoff
+agrid verify <code> --no-quickstart  # confirm code only
 agrid resend                     # request a fresh code if the first expired
 agrid login                      # store an API key you already have
 agrid doctor                     # service, database, and account status
@@ -83,6 +83,13 @@ The private key for each agent is generated locally and stays in the `Agent`
 object. Only the public key is registered with AgentGrid. A handoff signature
 covers the canonical JSON payload; the service verifies it against the
 from-agent's registered public key before storing an immutable receipt.
+
+### Framework drop-in
+
+Copy `examples/langgraph_handoff.py` from the repository into your own project.
+It is a single `handoff_node` you can paste into LangGraph, and its docstring has
+the CrewAI and OpenAI Agents SDK equivalents. It calls
+`planner.handoff_to(worker, task=..., scope=...)` and prints the real receipt.
 
 ## Copy-paste recipes
 

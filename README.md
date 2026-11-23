@@ -1,155 +1,123 @@
 # AgentGrid
 
-**Signed identity, discovery, and handoff receipts for AI agents.**
+Signed identity, discovery, and handoff receipts for AI agents.
 
-[Live service](https://agentgrid-pied.vercel.app) ·
-[Developer guide](https://agentgrid-pied.vercel.app/guide) ·
-[API reference](https://agentgrid-pied.vercel.app/docs) ·
-[PyPI](https://pypi.org/project/theoc-agentgrid-protocol/)
+AgentGrid is infrastructure for agents, not another chatbot. Developers register
+agents, publish signed capability cards, and record signed handoffs between
+agents. Anyone can verify a card with AgentGrid's published Ed25519 public key.
 
-AgentGrid is infrastructure for agents, not another chatbot. Register agents,
-publish signed capability cards that anyone can verify offline, and record signed
-handoffs between agents with scoped, immutable receipts.
+There is **no money inside the platform**: no wallet, no escrow, no auto top-up,
+no in-app checkout, and no automatic deduction. Usage is metered in an immutable
+ledger; the base subscription and overage are paid externally at cycle end.
 
-There is **no money inside the platform**: no wallet, escrow, auto top-up,
-in-app checkout, or automatic deduction. Usage is metered in an immutable ledger;
-subscriptions and overage are paid externally at cycle end.
+## Tiers
 
-## Why
+| Tier | Base | Included agents | Included handoffs / cycle |
+|---|---:|---:|---:|
+| Free | $0 | 5 | 100 |
+| Plus | $20/cycle | 100 | 10,000 |
+| Pro | $150/cycle | 1,000 | 100,000 |
+| Enterprise | Custom $2,500-$5,000/cycle | 10,000 | 1,000,000 |
 
-When one agent delegates to another, three questions come up fast:
+A cycle is one rolling month anchored to the signup day: registering on **Nov 18**
+ends the first cycle on **Dec 18**, the next on **Jan 18**, and so on. Day-end
+dates clamp for short months (Jan 31 → Feb 28/29). There is no calendar-month
+reset and no background job.
 
-1. **Who is this agent, really?** — a signed Agent Card, verifiable with a published Ed25519 key.
-2. **What was it allowed to do?** — a signed handoff with an explicit scope; nested handoffs cannot widen it.
-3. **What actually happened?** — an immutable receipt, readable by both sides.
+All tiers, including Free, allow overage until the hard cap of **3× included
+limits**. Beyond that, new agents and handoffs return HTTP 402 until the next
+cycle or a higher tier is granted.
 
-AgentGrid answers all three with one small HTTP API and a Python SDK.
+## Quick start
 
-## 60-second quickstart
-
-Registration is open self-service — no invite token, no operator approval — but
-a real email is required to confirm a reachable human.
+Use the hosted service — registration is open self-service, no invite token:
 
 ```bash
 pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
-agrid verify 123456          # 6-digit code from your inbox
-agrid quickstart
-agrid card <agent_id>        # ag_... ID printed by quickstart
-agrid receipts <agent_id>    # worker ID printed by quickstart
+agrid verify 123456          # code from your inbox; first handoff runs automatically
 ```
 
-`agrid register` sends a code and creates no key yet. `agrid verify` confirms it
-and stores your one-time `agk_...` key locally without printing it, then shows
-the exact next steps. If the code expires, run `agrid resend`. `agrid quickstart`
-registers two agents, verifies a card online and offline, signs a handoff, and
-reads the receipt. `agrid card` and `agrid receipts` let you check that work
-afterwards.
+Or run it locally:
 
-```text
-AgentGrid quickstart -> https://agentgrid-pied.vercel.app
-
-1. Registered agents: ag_... -> ag_...
-2. Card verified online=True and offline=True
-3. Signed handoff accepted: h_...
-4. Receipts for worker: 1
+```bash
+pip install -r requirements-dev.txt
+cp .env.example .env
+pytest
+uvicorn main:app --reload
 ```
 
-The service is live at **https://agentgrid-pied.vercel.app**. Public cards look like
-`https://agentgrid-pied.vercel.app/a/ag_...`.
+Register a client (works in production too):
 
-## Python usage
-
-```python
-from agentgrid_protocol import AgentGrid
-
-ag = AgentGrid()                 # reads AGENTGRID_API_KEY or ~/.agentgrid/credentials.json
-
-planner = ag.create_agent("Planner", capabilities=["plan"])
-worker  = ag.create_agent("Worker", capabilities=["read"])
-
-print(ag.verify_card(planner.agent_id))
-# {'agent_id': 'ag_...', 'online': True, 'status': 'ACTIVE', 'offline': True}
-
-receipt = planner.handoff_to(worker, task="summarize the quarterly report")
-print(receipt["handoff_id"], len(worker.receipts()))
+```bash
+curl -X POST http://localhost:8000/v1/clients/register \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com"}'
 ```
 
-The private key for each agent is generated locally and never sent to AgentGrid.
-Only the public key is registered. Handoffs are signed by the **from-agent** over
-canonical JSON; the service verifies the signature before storing an immutable
-receipt.
+The registration response contains no key. Confirm the emailed 6-digit code with
+`POST /v1/clients/verify-email` (or `agrid verify <code>`); the API key is returned
+only then. The CLI immediately runs a real signed handoff after verification, so
+you see a receipt without a fourth command. Use `agrid verify <code> --no-quickstart`
+to skip it, or `agrid quickstart` any time to run another demo. Use the key as
+`X-AgentGrid-API-Key` for all authenticated calls.
 
-### Offline card verification
+## Python SDK
 
-```python
-from agentgrid_protocol import AgentGrid, canonical, unsigned_card
-from agentgrid_protocol.crypto import b64d
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+For a one-command integration, use the published SDK:
 
-ag = AgentGrid()
-card = ag.card("ag_...")
-keys = ag.public_keys()             # includes previous_public_key during rotation
-Ed25519PublicKey.from_public_bytes(b64d(keys["public_key"])).verify(
-    b64d(card["signature"]), canonical(unsigned_card(card))
-)
+```bash
+pip install theoc-agentgrid-protocol
+agrid register --email you@example.com
+agrid verify 123456          # code from your inbox; first handoff runs automatically
 ```
 
-During rotation, iterate over both `public_key` and `previous_public_key`. CLI
-equivalent: `agrid card ag_...`.
+`agrid quickstart` registers two agents, verifies a signed card online and
+offline, records a signed handoff, and reads the immutable receipt. Import it as
+`agentgrid_protocol`. For a real framework drop-in, copy
+`examples/langgraph_handoff.py` into your LangGraph, CrewAI, or OpenAI Agents SDK
+project and adapt the single `handoff_node`. Full source and API details are in
+`sdk/README.md`; the hosted guide is at `https://agentgrid-pied.vercel.app/guide`.
 
-### Scoped handoff
+Self-service registration is open to everyone; there is no invite token to
+distribute. A real email is required and its 6-digit code must be confirmed before
+a key exists; the same address also helps recover a mistyped payment Client ID.
+An operator can still register a client directly with the admin key and a TOTP
+code when assisting someone:
 
-```python
-from agentgrid_protocol import AgentGrid
-
-ag = AgentGrid()
-planner = ag.create_agent("Planner", capabilities=["plan"])
-worker = ag.create_agent("Worker", capabilities=["read"])
-receipt = planner.handoff_to(
-    worker,
-    task="summarize the quarterly report",
-    scope={"allowed": ["read"], "max_actions": 2},
-)
-print(receipt["handoff_id"], receipt["scope"])
+```bash
+curl -X POST http://localhost:8000/v1/admin/clients/register \
+  -H 'X-AgentGrid-Admin-Key: ...' -H 'X-AgentGrid-Admin-MFA: 123456' \
+  -H 'Content-Type: application/json' \
+  -d '{"client_id":"cli_partner_01","email":"partner@example.com"}'
 ```
 
-A child handoff may only narrow inherited scope: `allowed` must be a subset and
-`max_actions` cannot increase. Only a SHA-256 task hash is stored.
+This returns a one-time API key just like public registration. In production,
+missing admin MFA configuration fails closed.
 
-### Read a receipt
+Create an agent (the public key is the agent's own Ed25519 public key, not
+AgentGrid's):
 
-```python
-from agentgrid_protocol import AgentGrid
-
-data = AgentGrid().receipts("ag_...")   # public: no API key needed
-for r in data["receipts"]:
-    print(r["handoff_id"], r["from_agent_id"], "->", r["to_agent_id"])
-    print("  task hash:", r["task_hash"], "scope:", r["scope"])
-print("total:", data["count"])
+```bash
+curl -X POST http://localhost:8000/v1/agents \
+  -H 'X-AgentGrid-API-Key: agk_...' -H 'Content-Type: application/json' \
+  -d '{"name":"Research Agent","capabilities":["web_search","summarize"],"public_key":"<base64url-32-byte-key>"}'
 ```
 
-CLI equivalent: `agrid receipts ag_...`. Receipts are immutable and readable by
-anyone who knows the agent ID.
+The response is a signed Agent Card. Share `/a/<agent_id>` or the JSON card at
+`/v1/agents/<agent_id>.json`.
 
-## FAQ
+## Verification
 
-- **Do I need an invite token?** No. Registration is open self-service.
-- **Where is my API key?** In `~/.agentgrid/credentials.json`; it is never
-  printed and shown only once by the service. Back it up.
-- **What does `agrid quickstart` do?** Creates two agents with local Ed25519
-  keys, verifies a card online and offline, signs a scoped handoff, and reads
-  the receipt — all real operations.
-- **Can a child agent widen inherited scope?** No. Subset only, and
-  `max_actions` cannot increase.
-- **Are receipts private?** No. Public by agent ID, containing a task hash, not
-  raw task text. Do not put sensitive data in the task field.
-- **Do I need a payment method?** No. Free tier needs no card; payments are
-  entirely external.
-- **What happens at the free limits?** Overage is metered up to 3× included
-  limits, then writes return HTTP 402. Check `agrid statement`.
+- `GET /v1/agents/public-key` — AgentGrid's Ed25519 public key. During rotation the
+  response also includes `previous_public_key`; old signatures stay verifiable.
+- `GET /v1/agents/{agent_id}/verify` — online signature/status check.
+- Cards are canonical JSON signed with Ed25519, so they can also be verified
+  offline with the published key.
 
-## Signed handoff payload
+## Handoffs
+
+A handoff is signed by the **from-agent** over this exact canonical payload:
 
 ```json
 {
@@ -164,66 +132,145 @@ anyone who knows the agent ID.
 }
 ```
 
-The service rejects stale timestamps (>300s), oversized scopes (>8 KB), non-finite
-numbers, and delegations that try to widen inherited scope. Receipts are immutable
-at the database level: triggers block direct `UPDATE` and `DELETE`.
+Post it to `/v1/agents/{from_agent_id}/handoffs`. AgentGrid verifies the
+signature against the registered from-agent public key, rejects timestamps older
+than 300 seconds, caps scope at 8 KB of canonical JSON, rejects non-finite
+numbers, enforces that nested delegations do not widen scope, and stores an
+immutable receipt. `GET /v1/agents/{agent_id}/receipts` returns the work history.
 
-## Tiers
+## Ledger-backed overage and statements
 
-| Tier | Base | Included agents | Included handoffs / cycle |
-|---|---:|---:|---:|
-| Free | $0 | 5 | 100 |
-| Plus | $20 | 100 | 10,000 |
-| Pro | $150 | 1,000 | 100,000 |
-| Enterprise | Custom $2,500–$5,000 | 10,000 | 1,000,000 |
+Usage above the included limits is written to `overage_ledger` as usage units,
+not money balances:
 
-A cycle is one rolling month anchored to the signup day (Nov 18 → Dec 18 → Jan 18);
-there is no calendar-month reset. **Every tier, including Free, allows overage** at
-`$1 per 1,000 extra handoffs` plus `$0.10 per extra agent per day`, up to a hard cap
-of 3× included limits. `GET /v1/billing/statement` returns the invoice and totals.
-External payments use a fixed ₹85 = $1 conversion; internal statements stay in USD.
+- `$1 per 1,000 extra handoffs` — one ledger row per overage handoff.
+- `$0.10 per extra agent per day` — one ledger row when an agent crosses the
+  included limit; days are prorated from creation to cycle end.
 
-Payment links: [Plus](https://payments.cashfree.com/forms/agentgrid-plus) ·
-[Pro](https://payments.cashfree.com/forms/agentgrid-pro) ·
-[Enterprise](https://payments.cashfree.com/forms/agentgrid-enterprise)
+`GET /v1/billing/statement` returns the current or closed-cycle statement with
+`base_fee_usd`, overage counts/rates, `total_due_usd`, hard caps, and an
+`invoice_id`. For a closed cycle it returns `final: true`, `payment_status:
+unpaid`, and no Cashfree order ID until payment is recorded. The `overage` flag
+in agent/handoff responses is metadata only; Agent Card signatures still cover
+the original unsigned card payload.
 
-Upgrade flow: register with the email you will pay with, get your Client ID, open
-the tier link, and enter that exact **AgentGrid Client ID** in the required field.
-The same email lets the operator recover a mistyped Client ID automatically. Access
-upgrades once payment is confirmed.
+Amounts are integer microdollars internally. Enterprise has no stored base
+amount; the statement shows a custom amount agreed manually. Nothing in the
+service can charge, deduct, hold, or transfer funds.
 
-## Repository layout
-
-```text
-main.py                  FastAPI service (API, landing page, guide, docs)
-sdk/                     Published Python SDK + CLI (`agrid`)
-examples/quickstart.py   Dependency-free end-to-end example
-tests/                   Service tests
-docs/                    External payment workflow, Vercel deployment
-```
-
-## Run locally
+The operator creates the external Cashfree/invoice link and quotes the
+`invoice_id`. After verifying the external payment, the operator records it:
 
 ```bash
-pip install -r requirements-dev.txt
-cp .env.example .env
-python -m pytest -q
-uvicorn main:app --reload
+curl -X POST \
+  http://localhost:8000/v1/admin/clients/cli_.../statements/2026-11-18/record-payment \
+  -H 'X-AgentGrid-Admin-Key: ...' -H 'X-AgentGrid-Admin-MFA: 123456' \
+  -H 'Content-Type: application/json' \
+  -d '{"cashfree_order_id":"order_123","cashfree_payment_id":"pay_123"}'
 ```
 
-Local development uses SQLite by default. Production requires
-`AGENTGRID_SIGNING_KEY_B64`, `AGENTGRID_ADMIN_KEY`, and `AGENTGRID_ADMIN_MFA_SECRET`;
-missing values fail closed. See [docs/DEPLOYMENT_VERCEL.md](docs/DEPLOYMENT_VERCEL.md).
+This is idempotent by Cashfree order ID. Reusing the same order returns
+`duplicate: true`; using it for another client/cycle returns 409. Only the
+statement's `payment_status` and an immutable `billing_history` row change.
 
-## Security notes
+See `EXTERNAL_PAYMENTS.md` for tier prices, the operator workflow, and the
+external-link requirements. No money moves inside AgentGrid.
 
-- Ed25519 signatures cover the original unsigned payload; response-only metadata
-  (like `overage`) is not signed.
-- Request bodies are capped at 64 KB from streamed bytes; rate limit is 120 req/min.
-- Admin endpoints require an admin key **and** a valid TOTP code.
+## Admin grant
+
+```bash
+curl -X POST http://localhost:8000/v1/admin/clients/cli_.../grant-access \
+  -H 'X-AgentGrid-Admin-Key: ...' -H 'X-AgentGrid-Admin-MFA: 123456' \
+  -H 'Content-Type: application/json' \
+  -d '{"tier":"pro","cashfree_order_id":"order_123","cashfree_payment_id":"pay_123"}'
+```
+
+This selects the tier for the current rolling cycle and applies it immediately.
+Access expires at the current cycle end, so the plan must be renewed for the next
+cycle. Idempotent by Cashfree order ID. Requires both the admin key and a valid
+TOTP code. Order/payment IDs are restricted to `[A-Za-z0-9_-]{3,128}`. Invalid
+tiers, order IDs, keys, or MFA codes are rejected before any state change. In
+production, missing MFA configuration and missing registration token fail closed.
+
+The grant records an external order reference; actual base + overage payment is
+recorded separately with `/record-payment` at cycle end.
+
+## Environment
+
+See `.env.example`. In production, `AGENTGRID_SIGNING_KEY_B64`,
+`AGENTGRID_ADMIN_KEY`, and `AGENTGRID_ADMIN_MFA_SECRET` are required/used
+fail-closed. Registration is intentionally open, so no registration token is
+needed. `AGENTGRID_PREVIOUS_SIGNING_KEY_B64` is optional and only for rotation.
+`AGENTGRID_RATE_LIMIT_PER_MIN` defaults to 120 and is shared across instances
+when Postgres is used.
+
+`AGENTGRID_SKIP_SCHEMA_ON_STARTUP=1` is for Lambda or other multi-instance
+deployments. When set, run `python migrate.py` once before serving traffic;
+this prevents cold starts from racing on schema or trigger creation.
+
+Rolling-cycle rollover and statement snapshots happen lazily on first access in
+a new cycle, so no scheduler or always-on worker is needed.
+
+## Hardening and immutability
+
+- Request bodies are capped at 64 KB from the **streamed bytes**, so chunked or
+  missing `Content-Length` bodies cannot bypass the limit.
+- Rate limiting is 120 requests/minute by default, keyed by API key (or client IP
+  when no key is supplied). Postgres deployments use a shared atomic counter
+  table; SQLite uses a process-local counter for local development.
+- Responses include `X-Content-Type-Options`, `X-Frame-Options`,
+  `Referrer-Policy`, and a restrictive `Content-Security-Policy`.
+- Strict validation covers API keys, handoff IDs, SHA-256 task hashes,
+  Cashfree IDs, endpoint URLs, scopes, timestamps, and TOTP input.
+- Ed25519 verification accepts the current signing key and, when configured,
+  the previous key so cards remain verifiable during rotation.
+- Database triggers make `agents`, `handoffs`, `audit_events`, `billing_history`,
+  and `overage_ledger` immutable: direct `UPDATE` and `DELETE` are blocked.
+  `clients` remains mutable only for tier, cycle counters, and access expiry;
+  `billing_statements` changes only from `unpaid`/`current` to `paid`.
 - Audit metadata drops secret-looking keys before storage.
-- No Cashfree server keys, webhooks, wallet, or in-app checkout live in this service.
 
-## License
+## Pre-deploy gate
 
-MIT — see [LICENSE](LICENSE).
+Do not deploy until all of these are true:
+
+```bash
+python -m pip install -r requirements-dev.txt
+python -m pytest -q    # expected: all tests passing
+```
+
+- Production env values are set from a secret manager, not committed.
+- Postgres/Neon connection is verified and `/health/ready` returns `ready`.
+- Signing key and previous key (if rotating) are backed up securely.
+- Admin TOTP secret is enrolled in an authenticator app.
+- External Cashfree hosted links exist for Plus, Pro, and custom Enterprise.
+- Public registration is open; abuse is bounded by the shared 120 req/min limit.
+- No live Cashfree server keys, webhooks, wallet, escrow, or in-app checkout.
+
+## Deployment targets
+
+### Vercel Hobby (active)
+
+The live deployment is on Vercel Hobby at `https://agentgrid-pied.vercel.app`,
+backed by Neon Postgres. Python functions run the existing FastAPI app without
+code changes. Deploy with `vercel deploy --prod --yes` from this folder.
+
+See `DEPLOYMENT_VERCEL.md` for the full setup, environment variables, health
+checks, smoke tests, and usage guardrails.
+
+### Inactive alternatives (reference only)
+
+The following are kept for reference and are **not** active deployment paths:
+
+- Google Cloud Run — see `DEPLOYMENT_GCP.md` and `scripts/deploy_cloud_run.ps1`.
+- AWS Lambda — see `DEPLOYMENT_AWS_LAMBDA.md` and `lambda_handler.py`.
+- Oracle Always Free — see `DEPLOYMENT_ORACLE.md` (signup requires a card).
+- Render Free — see `DEPLOYMENT_RENDER.md` (cold starts; inactive).
+- Cloudflare Workers — abandoned: async SQLAlchemy needs greenlet, which is not
+  available in that runtime.
+
+## What was intentionally left out
+
+Wallet balance, automatic overage deduction, escrow, marketplace payments, auto
+top-up, live Cashfree keys on the server, webhooks, always-on database, and
+CockroachDB.
