@@ -232,6 +232,21 @@ class AgentGrid:
             auth=False,
         )
 
+    def upgrade_email(self, email: str) -> dict[str, Any]:
+        """Attach an email to a legacy client using its existing key.
+
+        The returned response is pending verification. Confirm with
+        :meth:`verify_email` and the emailed code to receive a replacement key.
+        """
+        normalized = str(email or "").strip()
+        if not normalized:
+            raise AgentGridError(0, "A real email is required.")
+        return self._request(
+            "POST",
+            "/v1/clients/me/upgrade-email",
+            {"email": normalized},
+        )
+
     def health(self) -> dict[str, Any]:
         return self._request("GET", "/health/ready", auth=False)
 

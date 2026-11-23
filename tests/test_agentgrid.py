@@ -552,6 +552,52 @@ def test_email_verification_issues_key_only_after_code(api):
     assert row == (1, None, None)
 
 
+def test_legacy_account_upgrade_verifies_email_and_rotates_key(api):
+    """Pre-email accounts can attach an email, prove the inbox, and get a new key."""
+    legacy_id = "cli_legacy_upgrade"
+    legacy = _register(api, client_id=legacy_id, email="old-legacy@example.test")
+    old_key = legacy["api_key"]
+
+    with sqlite3.connect(TEST_DB_PATH) as conn:
+        conn.execute(
+            "UPDATE clients SET email = NULL, email_verified = 1, "
+            "verification_code_hash = NULL, verification_expires_at = NULL, "
+            "verification_sent_at = NULL WHERE client_id = ?",
+            (legacy_id,),
+        )
+    assert api.get("/v1/clients/me", headers=_headers(old_key)).status_code == 200
+
+    upgrade = api.post(
+        "/v1/clients/me/upgrade-email",
+        headers=_headers(old_key),
+        json={"email": "Legacy@Example.Test"},
+    )
+    assert upgrade.status_code == 200, upgrade.text
+    data = upgrade.json()
+    assert data["legacy_upgrade"] is True
+    assert data["verification_required"] is True
+    assert data["email"] == "legacy@example.test"
+    assert "api_key" not in data
+    code = data["verification_code"]
+
+    assert api.get("/v1/clients/me", headers=_headers(old_key)).status_code == 401
+
+    verified = api.post(
+        "/v1/clients/verify-email", json={"client_id": legacy_id, "code": code}
+    )
+    assert verified.status_code == 200, verified.text
+    new_key = verified.json()["api_key"]
+    assert new_key != old_key
+    assert api.get("/v1/clients/me", headers=_headers(new_key)).status_code == 200
+
+    again = api.post(
+        "/v1/clients/me/upgrade-email",
+        headers=_headers(new_key),
+        json={"email": "other@example.test"},
+    )
+    assert again.status_code == 409
+
+
 def test_verification_expiry_resend_and_attempt_limit(api):
     client_id, pending = _pending_registration(api)
     code = pending["verification_code"]

@@ -42,6 +42,13 @@ def fake_client():
             }
         if method == "POST" and path == "/v1/clients/resend-verification":
             return 200, {"client_id": body["client_id"], "verification_required": True}
+        if method == "POST" and path == "/v1/clients/me/upgrade-email":
+            return 200, {
+                "client_id": "cli_test",
+                "email": body["email"].strip().lower(),
+                "verification_required": True,
+                "legacy_upgrade": True,
+            }
         if path == "/health/ready":
             return 200, {"status": "ready", "database": "connected"}
         if path == "/v1/clients/me":
@@ -231,6 +238,44 @@ def test_cli_register_prints_verify_step_and_stores_no_key(monkeypatch, capsys):
     assert "agrid resend" in output
     assert "/guide" in output
     assert "/docs" in output
+
+
+def test_client_upgrade_email_posts_with_existing_key():
+    client, calls = fake_client()
+    with pytest.raises(AgentGridError) as exc:
+        client.upgrade_email("   ")
+    assert "real email is required" in str(exc.value)
+
+    result = client.upgrade_email(" Legacy@Example.Test ")
+    assert result["legacy_upgrade"] is True
+    assert result["email"] == "legacy@example.test"
+    call = calls[-1]
+    assert call["method"] == "POST"
+    assert call["path"] == "/v1/clients/me/upgrade-email"
+    assert call["headers"]["X-AgentGrid-API-Key"] == "agk_test_key"
+
+
+def test_cli_update_starts_legacy_upgrade_and_saves_pending_id(monkeypatch, capsys):
+    client, calls = fake_client()
+    pending: dict[str, str] = {}
+
+    monkeypatch.setattr(cli, "load_api_key", lambda: "agk_legacy")
+    monkeypatch.setattr(cli, "AgentGrid", lambda **kwargs: client)
+    monkeypatch.setattr(
+        cli,
+        "save_pending_client",
+        lambda client_id: pending.setdefault("client_id", client_id) or "pending.json",
+    )
+
+    assert cli.main(["update", "--email", "Legacy@Example.Test"]) == 0
+    output = capsys.readouterr().out
+    call = next(c for c in calls if c["path"] == "/v1/clients/me/upgrade-email")
+    assert call["body"]["email"] == "Legacy@Example.Test"
+    assert pending["client_id"] == "cli_test"
+    assert "Legacy account update started" in output
+    assert "agrid verify <code>" in output
+    assert "stops working until you verify" in output
+    assert "agk_" not in output
 
 
 def test_cli_verify_saves_key_and_clears_pending(monkeypatch, capsys):

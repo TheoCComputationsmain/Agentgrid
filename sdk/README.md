@@ -34,6 +34,14 @@ receipt, so there is no fourth command. Pass `--no-quickstart` to skip it, or ru
 `agrid quickstart` later for another demo. If the code expires, run `agrid resend`
 (60-second cooldown). If you already have a key, use `agrid login`.
 
+### Signed up before email verification?
+
+If your client was created before we required email, it has a key but no email on
+file. Run `agrid update --email you@example.com` with that key still saved
+locally, then `agrid verify <code>` with the emailed code. Your current key stops
+working while the code is pending and is replaced at verification. If you lost
+the old key, register a new free client.
+
 Expected output:
 
 ```text
@@ -54,6 +62,7 @@ agrid register                   # create an unverified client (prompts for emai
 agrid verify <code>              # confirm code, save key, run first handoff
 agrid verify <code> --no-quickstart  # confirm code only
 agrid resend                     # request a fresh code if the first expired
+agrid update --email you@example.com  # legacy pre-email accounts only
 agrid login                      # store an API key you already have
 agrid doctor                     # service, database, and account status
 agrid statement                  # current invoice and hard caps

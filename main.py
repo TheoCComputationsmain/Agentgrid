@@ -670,9 +670,11 @@ app = FastAPI(
         "the emailed code, so unverified signups cannot use the service. "
         "`agrid verify` immediately runs a real signed handoff; use "
         "`agrid quickstart` any time for another demo and `--no-quickstart` to "
-        "skip it. Copy-paste recipes (offline verify, scoped "
-        "handoff, receipt read), a LangGraph/CrewAI/OpenAI Agents drop-in, and the "
-        "FAQ live in the [developer guide](/guide). Registration is open "
+        "skip it. Accounts created before email verification can run "
+        "`agrid update --email you@example.com` and then `agrid verify <code>`; "
+        "the old key is replaced at that point. Copy-paste recipes (offline verify, "
+        "scoped handoff, receipt read), a LangGraph/CrewAI/OpenAI Agents drop-in, "
+        "and the FAQ live in the [developer guide](/guide). Registration is open "
         "self-service; payments happen outside AgentGrid."
     ),
     lifespan=lifespan,
@@ -1375,6 +1377,14 @@ and the same AgentGrid Client ID.</p>
 <p>No. <code>agrid register</code> is open self-service. You do need a real email: a 6-digit
 code is sent there and the API key is created only after you confirm it.</p>
 
+<h3>I signed up before email verification. How do I update?</h3>
+<p>If your client has a key but no email on file, run
+<code>agrid update --email you@example.com</code> with that key still saved locally.
+We email a 6-digit code and your current key stops working until you confirm it.
+Then run <code>agrid verify &lt;code&gt;</code>: it stores a replacement key and runs
+your first signed handoff automatically. If you lost the old key, register a new
+free client instead.</p>
+
 <h3>Does email verification prove I am human?</h3>
 <p>It proves you control the inbox at signup, which blocks random bot signups and makes every
 account reachable. It is not a biometric or CAPTCHA-style proof. Unverified signups have no
@@ -2062,6 +2072,77 @@ async def update_my_email(
     client.email = payload.email.strip().lower()
     await db.commit()
     return {"client_id": client_id, "email": client.email}
+
+
+@app.post("/v1/clients/me/upgrade-email")
+async def upgrade_legacy_email(
+    payload: UpdateEmailRequest,
+    request: Request,
+    client_id: str = Depends(verify_api_key),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, Any]:
+    """Attach an email to a legacy account and start inbox verification.
+
+    Accounts created before email verification had a key issued immediately and
+    were backfilled as verified, but have no email on file. The existing key
+    proves ownership of the client here. After this call the old key stops
+    working until the emailed code is confirmed with ``/v1/clients/verify-email``,
+    which issues a replacement key.
+    """
+    client = await db.get(ClientModel, client_id)
+    if not client:
+        raise HTTPException(status_code=404, detail="Client not found.")
+    if client.email:
+        raise HTTPException(
+            status_code=409,
+            detail="This client already has an email. Use PATCH /v1/clients/me/email to change it.",
+        )
+    if not client.email_verified:
+        raise HTTPException(
+            status_code=409,
+            detail="This client is already pending verification. Run `agrid resend` or `agrid verify <code>`.",
+        )
+
+    now = datetime.now(timezone.utc)
+    sent = _parse_iso(client.verification_sent_at)
+    if sent:
+        if sent.tzinfo is None:
+            sent = sent.replace(tzinfo=timezone.utc)
+        if (now - sent).total_seconds() < RESEND_COOLDOWN_SECONDS:
+            raise HTTPException(
+                status_code=429,
+                detail=f"Please wait {RESEND_COOLDOWN_SECONDS} seconds before requesting another code.",
+            )
+
+    email = payload.email.strip().lower()
+    code = f"{secrets.randbelow(1_000_000):06d}"
+    client.email = email
+    client.email_verified = False
+    client.verification_code_hash = _hash_verification_code(client_id, code)
+    client.verification_expires_at = (now + timedelta(minutes=VERIFICATION_TTL_MINUTES)).isoformat()
+    client.verification_sent_at = now.isoformat()
+    client.verification_attempts = 0
+    record_audit(
+        db,
+        client_id=client_id,
+        action="client.email_upgrade_started",
+        target_type="client",
+        target_id=client_id,
+        metadata={"email": email},
+    )
+    await db.commit()
+
+    response = _verification_pending_response(client)
+    response["legacy_upgrade"] = True
+    response["message"] = (
+        "Email saved. Check your inbox for a 6-digit code, then run "
+        "`agrid verify <code>`. Your current key is replaced at that point; "
+        "keep it until verification finishes."
+    )
+    if APP_ENV != "production":
+        response["verification_code"] = code
+    await send_verification_email(email, client_id, code, str(request.base_url))
+    return response
 
 
 # ---------------------------------------------------------------------------

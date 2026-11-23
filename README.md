@@ -76,6 +76,11 @@ agrid register --email you@example.com
 agrid verify 123456          # code from your inbox; first handoff runs automatically
 ```
 
+Signed up before email verification? If your client has a key but no email on
+file, run `agrid update --email you@example.com`, then `agrid verify <code>`.
+Your current key stops working while the code is pending and is replaced at
+verification; if you lost the old key, register a new free client.
+
 `agrid quickstart` registers two agents, verifies a signed card online and
 offline, records a signed handoff, and reads the immutable receipt. Import it as
 `agentgrid_protocol`. For a real framework drop-in, copy

@@ -118,6 +118,29 @@ def cmd_resend(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_update(args: argparse.Namespace) -> int:
+    _require_key(args)
+    client = _client(args)
+    email = (args.email or "").strip()
+    if not email:
+        try:
+            email = input("AgentGrid email (required): ").strip()
+        except EOFError as exc:
+            raise AgentGridError(0, "A real email is required.") from exc
+    if not email:
+        raise AgentGridError(0, "A real email is required.")
+
+    result = client.upgrade_email(email)
+    client_id = str(result["client_id"])
+    pending_path = save_pending_client(client_id)
+    print("Legacy account update started for " + client_id)
+    print("A 6-digit code was sent to " + str(result.get("email", email)) + ".")
+    print("Check your inbox, then run: agrid verify <code>")
+    print("Your current key stops working until you verify; the new key replaces it then.")
+    print("Pending client ID saved at " + str(pending_path) + " (verify needs no --client-id).")
+    return 0
+
+
 def cmd_login(args: argparse.Namespace) -> int:
     key = args.api_key or getpass.getpass("AgentGrid API key: ").strip()
     if not key.startswith("agk_"):
@@ -242,6 +265,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--client-id", default=None, help="override the pending client ID from `agrid register`"
     )
     resend.set_defaults(func=cmd_resend)
+
+    update = sub.add_parser(
+        "update", help="attach and verify an email on a pre-verification legacy account"
+    )
+    update.add_argument("--email", default=None, help="real email for the 6-digit code")
+    update.set_defaults(func=cmd_update)
 
     login = sub.add_parser("login", help="store an API key locally")
     login.add_argument("--api-key", default=None, help="API key (prompted if omitted)")
