@@ -720,7 +720,11 @@ def _with_security_headers(response, path: str = ""):
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     path = request.url.path
-    exempt = path.startswith("/health") or path in {"/", "/docs", "/openapi.json", "/redoc"}
+    exempt = (
+        path.startswith("/health")
+        or path in {"/", "/docs", "/openapi.json", "/redoc", "/robots.txt", "/sitemap.xml"}
+        or (path.startswith("/google") and path.endswith(".html"))
+    )
 
     if not exempt:
         length_header = request.headers.get("content-length")
@@ -2009,6 +2013,32 @@ async def robots_txt() -> str:
         "Disallow: /health/\n"
         "\n"
         f"Sitemap: {PUBLIC_BASE_URL}/sitemap.xml\n"
+    )
+
+
+def _google_verification_tokens() -> set[str]:
+    return {
+        value.strip()
+        for value in os.environ.get("AGENTGRID_GOOGLE_VERIFICATION_TOKENS", "").split(",")
+        if value.strip()
+    }
+
+
+@app.get("/google{token}.html", include_in_schema=False)
+async def google_site_verification(token: str) -> PlainTextResponse:
+    """Serve only the exact Google ownership-verification file we configured.
+
+    Google flags sites that generate a valid verification file for arbitrary
+    tokens as hacked, so this route is an explicit allowlist from a private Vercel
+    environment variable. No token is stored in the repo or shared in chat.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", token):
+        raise HTTPException(status_code=404, detail="Not Found")
+    if token not in _google_verification_tokens():
+        raise HTTPException(status_code=404, detail="Not Found")
+    return PlainTextResponse(
+        f"google-site-verification: google{token}.html",
+        headers={"Cache-Control": "public, max-age=300"},
     )
 
 
