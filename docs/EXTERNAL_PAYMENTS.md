@@ -221,8 +221,10 @@ client returns HTTP 409.
 ## Recovery email
 
 Public registration is open self-service (`POST /v1/clients/register` needs no
-invite token). Both it and `POST /v1/admin/clients/register` accept an optional
-`email`. Existing clients can set or change it with:
+invite token), but `email` is required and must be confirmed with the emailed
+6-digit code before a key is issued. `POST /v1/admin/clients/register` also
+requires an email and marks the account verified immediately. Existing clients
+can set or change their recovery email with:
 
 ```bash
 curl -X PATCH \
