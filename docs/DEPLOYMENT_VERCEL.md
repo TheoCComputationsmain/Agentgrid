@@ -71,7 +71,7 @@ registration token.
 
 On every successful registration AgentGrid sends a three-step welcome message.
 Configure exactly ONE delivery mode in the Vercel dashboard. All timeouts are
-5 seconds and any failure is logged by exception type only — registration never
+10 seconds and any failure is logged by exception type only — registration never
 fails because email failed.
 
 1. **Your own webhook (recommended if you already run the operator bridge):**

@@ -11,7 +11,7 @@ of these in the Vercel project environment:
    ``..._SMTP_PASSWORD`` + ``AGENTGRID_WELCOME_FROM_EMAIL`` — send via SMTP
    (e.g. a Gmail app password). Used only if 1 and 2 are not configured.
 
-Every mode is best-effort: a 5-second timeout, failures logged by type only,
+Every mode is best-effort: a 10-second timeout, failures logged by type only,
 and registration never fails because email failed. No API key is ever included
 in the message.
 """
@@ -55,7 +55,7 @@ def _default_poster(url: str, payload: dict[str, Any], token: str) -> None:
         method="POST",
         headers=headers,
     )
-    with urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=10) as response:
         if response.status >= 400:
             raise RuntimeError(f"webhook returned HTTP {response.status}")
 
@@ -70,22 +70,38 @@ def _resend_poster(payload: dict[str, Any], api_key: str) -> None:
             "Authorization": "Bearer " + api_key,
         },
     )
-    with urlopen(request, timeout=5) as response:
+    with urlopen(request, timeout=10) as response:
         if response.status >= 400:
             raise RuntimeError(f"resend returned HTTP {response.status}")
 
 
 def _smtp_poster(message: EmailMessage, host: str, port: int, user: str, password: str) -> None:
     context = ssl.create_default_context()
+    # A real hostname in EHLO avoids providers dropping connections from an
+    # unnamed serverless container.
+    local_hostname = "agentgrid-pied.vercel.app"
     if port == 465:
-        with smtplib.SMTP_SSL(host, port, timeout=5, context=context) as server:
+        with smtplib.SMTP_SSL(
+            host, port, timeout=10, context=context, local_hostname=local_hostname
+        ) as server:
             server.login(user, password)
             server.send_message(message)
     else:
-        with smtplib.SMTP(host, port, timeout=5) as server:
+        with smtplib.SMTP(host, port, timeout=10, local_hostname=local_hostname) as server:
+            server.ehlo()
             server.starttls(context=context)
+            server.ehlo()
             server.login(user, password)
             server.send_message(message)
+
+
+def _safe_exc(exc: Exception, *secrets: str) -> str:
+    """Exception text for logs, with any credential substrings removed."""
+    text = str(exc)
+    for secret in secrets:
+        if secret:
+            text = text.replace(secret, "[redacted]")
+    return text[:200]
 
 
 # Module level so tests can replace these without any network access.
@@ -230,7 +246,27 @@ async def send_welcome_email(email: str, client_id: str, base_url: str = "") -> 
             )
             return True
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Welcome email SMTP failed (%s)", type(exc).__name__)
-            return False
+            logger.warning(
+                "Welcome email SMTP failed on %s (%s: %s)",
+                port,
+                type(exc).__name__,
+                _safe_exc(exc, smtp_user, smtp_password),
+            )
+            # Some serverless egress paths drop implicit TLS but accept STARTTLS
+            # (or vice versa). Try the other standard submission port once.
+            fallback = 587 if port == 465 else 465
+            try:
+                await asyncio.to_thread(
+                    _smtp_send, mail, smtp_host, fallback, smtp_user, smtp_password
+                )
+                return True
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning(
+                    "Welcome email SMTP fallback failed on %s (%s: %s)",
+                    fallback,
+                    type(exc2).__name__,
+                    _safe_exc(exc2, smtp_user, smtp_password),
+                )
+                return False
 
     return False
