@@ -14,6 +14,8 @@ There is **no money inside the platform**: no wallet, no escrow, no auto top-up,
 no in-app checkout, and no automatic deduction. Usage is metered in an immutable
 ledger; the base subscription and overage are paid externally at cycle end.
 
+**Write-up:** [I built a signed handoff layer for AI agents (and you can verify it offline)](https://dev.to/theoc_computations_21b3c7/i-built-a-signed-handoff-layer-for-ai-agents-and-you-can-verify-it-offline-5alh)
+
 ## Tiers
 
 | Tier | Base | Included agents | Included handoffs / cycle |

@@ -1294,6 +1294,7 @@ your statement is only for operator reconciliation.</div>
 <p><a href="/guide">Developer guide</a> &middot; <a href="/docs">API reference</a> &middot;
 <a href="/openapi.json">OpenAPI</a> &middot; <a href="/v1/agents/public-key">Platform public key</a> &middot;
 <a href="/health/ready">Health</a></p>
+<p><strong>Write-up:</strong> <a href="https://dev.to/theoc_computations_21b3c7/i-built-a-signed-handoff-layer-for-ai-agents-and-you-can-verify-it-offline-5alh">I built a signed handoff layer for AI agents (and you can verify it offline)</a></p>
 </body></html>"""
 
 GUIDE_STRUCTURED_DATA: dict[str, Any] = {
@@ -1410,6 +1411,7 @@ GUIDE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 ) + PUBLIC_STYLE + """</head><body>
 <h1>Developer guide</h1>
 <p><a href="/">&larr; Home</a></p>
+<p><strong>Write-up:</strong> <a href="https://dev.to/theoc_computations_21b3c7/i-built-a-signed-handoff-layer-for-ai-agents-and-you-can-verify-it-offline-5alh">I built a signed handoff layer for AI agents (and you can verify it offline)</a> — design notes and the full walkthrough.</p>
 
 <h2 id="quickstart">Start here: 3 steps (~1 minute), or no code</h2>
 <p><strong>No code:</strong> use the <a href="/quickstart">browser quickstart</a>. It verifies your

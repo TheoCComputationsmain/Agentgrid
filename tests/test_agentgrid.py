@@ -198,6 +198,7 @@ def test_no_code_quickstart_creates_real_handoff(api, monkeypatch):
     landing = api.get("/")
     assert "without writing code" in landing.text
     assert 'href="/quickstart"' in landing.text
+    assert "i-built-a-signed-handoff-layer-for-ai-agents" in landing.text
 
     page = api.get("/quickstart")
     assert page.status_code == 200
@@ -1469,6 +1470,7 @@ def test_admin_flags_disposable_email_without_blocking_signup(api):
 def test_guide_has_three_step_quickstart_recipes_and_faq(api):
     guide = api.get("/guide").text
     assert "Start here: 3 steps" in guide
+    assert "i-built-a-signed-handoff-layer-for-ai-agents" in guide
     for marker in (
         "agrid register",
         "agrid verify",
