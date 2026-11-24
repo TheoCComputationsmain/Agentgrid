@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -191,6 +192,55 @@ def test_ops_lite_single_step_snapshot(api):
     logout = api.post("/v1/ops-lite/logout", follow_redirects=False)
     assert logout.status_code == 303
     assert api.get("/ops-lite").text.count("Read key") >= 1
+
+
+def test_no_code_quickstart_creates_real_handoff(api, monkeypatch):
+    landing = api.get("/")
+    assert "without writing code" in landing.text
+    assert 'href="/quickstart"' in landing.text
+
+    page = api.get("/quickstart")
+    assert page.status_code == 200
+    assert "no code needed" in page.text
+    assert "no-store" in page.headers["cache-control"]
+
+    captured: dict[str, str] = {}
+
+    async def capture_code(email, client_id, code, base_url):
+        captured["code"] = code
+
+    monkeypatch.setattr(main, "send_verification_email", capture_code)
+
+    started = api.post(
+        "/v1/quickstart/start",
+        data={"email": f"nocode_{uuid.uuid4().hex}@example.test"},
+    )
+    assert started.status_code == 200, started.text
+    assert "Check your inbox" in started.text
+    client_id = re.search(r"Client ID: <code>([^<]+)</code>", started.text).group(1)
+    assert captured["code"]
+    assert captured["code"] not in started.text
+
+    bad = api.post(
+        "/v1/quickstart/finish",
+        data={"client_id": client_id, "code": "000000" if captured["code"] != "000000" else "111111"},
+    )
+    assert bad.status_code == 400
+    assert "Invalid code" in bad.text
+
+    finished = api.post(
+        "/v1/quickstart/finish",
+        data={"client_id": client_id, "code": captured["code"]},
+    )
+    assert finished.status_code == 200, finished.text
+    assert "Your handoff is recorded" in finished.text
+    assert "API key for CLI/SDK use" in finished.text
+    assert re.search(r"h_[0-9a-f]{32}", finished.text)
+
+    agents = _sqlite_rows("SELECT agent_id FROM agents WHERE client_id = ?", (client_id,))
+    handoffs = _sqlite_rows("SELECT handoff_id FROM handoffs WHERE client_id = ?", (client_id,))
+    assert len(agents) == 2
+    assert len(handoffs) == 1
 
 
 def test_open_registration_and_api_key_auth(api):

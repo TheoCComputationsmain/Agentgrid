@@ -32,7 +32,7 @@ from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
 from welcome_email import send_verification_email, send_welcome_email
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import Boolean, Column, Integer, String, Text, func, text, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -1247,7 +1247,11 @@ publish a signed capability card anyone can verify offline, and record signed
 handoffs between agents with scoped, immutable receipts. Usage is metered in a
 ledger; money never enters the platform.</p>
 
-<h2>Three commands to your first handoff</h2>
+<h2>Get a signed handoff without writing code</h2>
+<p><strong>No-code option:</strong> <a href="/quickstart">open the browser quickstart</a>. Enter your
+email, confirm the 6-digit code, and we show your two agents, signed handoff, and immutable receipt.
+No wallet, card, or CLI needed.</p>
+<p class="muted">Prefer the CLI? It is still three commands:</p>
 <pre>pip install theoc-agentgrid-protocol
 agrid register --email you@example.com
 agrid verify 123456       # code from inbox; first handoff runs automatically</pre>
@@ -1407,7 +1411,11 @@ GUIDE_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <h1>Developer guide</h1>
 <p><a href="/">&larr; Home</a></p>
 
-<h2 id="quickstart">Start here: 3 steps (~1 minute)</h2>
+<h2 id="quickstart">Start here: 3 steps (~1 minute), or no code</h2>
+<p><strong>No code:</strong> use the <a href="/quickstart">browser quickstart</a>. It verifies your
+email, creates two demo agents, signs a scoped handoff, and shows the receipt. Demo keys are
+generated on the server and discarded; use the CLI/SDK when private keys must stay on your machine.</p>
+<p class="muted">The command path below does the same thing locally with your own keys:</p>
 <ol>
 <li><strong>Install and register.</strong> Run <code>pip install theoc-agentgrid-protocol</code>,
 then <code>agrid register --email you@example.com</code>. It is free and open — no invite token
@@ -2053,6 +2061,7 @@ async def sitemap_xml(db: AsyncSession = Depends(get_db)) -> str:
     today = date.today().isoformat()
     static_paths = [
         ("/", "1.0", "weekly"),
+        ("/quickstart", "0.9", "weekly"),
         ("/guide", "0.9", "weekly"),
         ("/docs", "0.7", "monthly"),
         ("/openapi.json", "0.5", "monthly"),
@@ -2363,6 +2372,326 @@ async def resend_verification(
         response["verification_code"] = code
     await send_verification_email(client.email, client.client_id, code, str(request.base_url))
     return response
+
+
+# ---------------------------------------------------------------------------
+# No-code quickstart: email -> code -> real signed handoff, all in the browser.
+# ---------------------------------------------------------------------------
+QUICKSTART_STYLE = """
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#08101f;color:#eaf0ff;font:15px/1.55 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+.wrap{max-width:820px;margin:0 auto;padding:34px 20px 70px}
+h1{margin:0 0 .3rem;font-size:2rem}
+h2{margin:2rem 0 .7rem;border-bottom:1px solid #243456;padding-bottom:.35rem}
+a{color:#7ee7c7}
+.muted{color:#9db0d0}
+.card{background:#111c34;border:1px solid #243456;border-radius:12px;padding:18px 20px;margin:16px 0}
+label{display:block;margin:14px 0 5px;font-weight:600}
+input{width:100%;max-width:420px;padding:11px 12px;border-radius:8px;border:1px solid #2c3d63;background:#0d172b;color:#eaf0ff;font-size:16px}
+button{margin-top:16px;padding:11px 18px;border:0;border-radius:8px;background:#7ee7c7;color:#08101f;font-weight:700;cursor:pointer}
+code{background:#15213c;padding:2px 6px;border-radius:5px;word-break:break-all}
+.error{background:#40202a;border:1px solid #a3445d;color:#ffd9e1;border-radius:8px;padding:10px 14px;margin:14px 0}
+.note{background:#16243f;border:1px solid #2c3d63;border-radius:8px;padding:10px 14px;margin:14px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:18px 0}
+.stat .n{font-size:1.5rem;font-weight:700;color:#7ee7c7}
+.stat .l{font-size:.85rem;color:#9db0d0}
+details{margin-top:14px}
+</style>
+"""
+
+
+def _quickstart_headers() -> dict[str, str]:
+    return {"Cache-Control": "no-store"}
+
+
+def _quickstart_shell(title: str, body: str) -> str:
+    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="description" content="Get a signed AgentGrid handoff and receipt without writing code.">
+<title>{html.escape(title)}</title>{QUICKSTART_STYLE}</head><body><div class="wrap">{body}</div></body></html>"""
+
+
+def _quickstart_start_html(error: str = "") -> str:
+    error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
+    return _quickstart_shell(
+        "AgentGrid · No-code quickstart",
+        f"""
+<p><a href="/">&larr; Home</a> · <a href="/guide">Developer guide</a></p>
+<h1>Your first signed handoff, no code needed</h1>
+<p class="muted">Enter a real email address. We send a 6-digit code; nothing is created without it.</p>
+{error_html}
+<div class="card">
+<form method="post" action="/v1/quickstart/start">
+<label for="email">Email address</label>
+<input id="email" name="email" type="email" autocomplete="email" required maxlength="320">
+<button type="submit">Send verification code</button>
+</form>
+</div>
+<div class="note"><strong>What happens next?</strong> After you confirm the code, AgentGrid creates
+two demo agents, signs a scoped handoff, and shows the receipt. No wallet, card, or API key is
+needed for this demo. For production use, the CLI/SDK keeps private keys on your own machine.</div>
+""",
+    )
+
+
+def _quickstart_code_html(
+    client_id: str, error: str = "", notice: str = "", *, api_key: str = ""
+) -> str:
+    error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
+    notice_html = f'<div class="note">{html.escape(notice)}</div>' if notice else ""
+    key_html = ""
+    if api_key:
+        key_html = (
+            "<details><summary>API key from verification (only if you plan to use the CLI/SDK)</summary>"
+            f"<p><code>{html.escape(api_key)}</code></p>"
+            "<p class='muted'>Store it privately. It is shown only once.</p></details>"
+        )
+    safe_id = html.escape(client_id, quote=True)
+    return _quickstart_shell(
+        "AgentGrid · Check your inbox",
+        f"""
+<p><a href="/quickstart">&larr; Start over</a></p>
+<h1>Check your inbox</h1>
+<p class="muted">Client ID: <code>{safe_id}</code></p>
+{error_html}{notice_html}
+<div class="card">
+<form method="post" action="/v1/quickstart/finish">
+<input type="hidden" name="client_id" value="{safe_id}">
+<label for="code">6-digit code</label>
+<input id="code" name="code" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" minlength="6" autocomplete="one-time-code" required>
+<button type="submit">Verify and create my handoff</button>
+</form>
+<form method="post" action="/v1/quickstart/resend">
+<input type="hidden" name="client_id" value="{safe_id}">
+<button type="submit">Resend code</button>
+</form>
+</div>
+{key_html}
+""",
+    )
+
+
+def _quickstat(label: str, value: Any) -> str:
+    return (
+        f'<div class="card stat"><div class="n">{html.escape(str(value))}</div>'
+        f'<div class="l">{html.escape(label)}</div></div>'
+    )
+
+
+def _quickstart_done_html(result: dict[str, Any]) -> str:
+    planner = html.escape(str(result["planner_id"]))
+    worker = html.escape(str(result["worker_id"]))
+    handoff = html.escape(str(result["handoff_id"]))
+    client_id = html.escape(str(result["client_id"]))
+    card_url = html.escape(str(result["card_url"]), quote=True)
+    receipts_url = html.escape(str(result["receipts_url"]), quote=True)
+    api_key = html.escape(str(result.get("api_key", "")), quote=True)
+    key_html = (
+        f"<details><summary>API key for CLI/SDK use (optional)</summary><p><code>{api_key}</code></p>"
+        "<p class='muted'>Store it privately. It is shown only once.</p></details>"
+    ) if api_key else ""
+    return _quickstart_shell(
+        "AgentGrid · Handoff created",
+        f"""
+<p><a href="/quickstart">&larr; Run another demo</a> · <a href="/guide">Developer guide</a></p>
+<h1>Your handoff is recorded</h1>
+<p class="muted">Client ID: <code>{client_id}</code></p>
+<div class="grid">
+{_quickstat("Agents created", 2)}
+{_quickstat("Signed handoffs", 1)}
+{_quickstat("Receipts", result.get("receipt_count", 1))}
+</div>
+<div class="card">
+<p><strong>Planner:</strong> <code>{planner}</code></p>
+<p><strong>Worker:</strong> <code>{worker}</code></p>
+<p><strong>Handoff:</strong> <code>{handoff}</code></p>
+<p><a href="{card_url}">Open the signed Agent Card</a> &middot;
+<a href="{receipts_url}">Read the immutable receipt JSON</a></p>
+</div>
+<div class="note">This no-code demo generates demo keys on the server and discards them immediately.
+For real deployments, use <code>agrid</code> or the Python SDK so private keys never leave your machine.</div>
+{key_html}
+""",
+    )
+
+
+async def _quickstart_form_fields(request: Request) -> dict[str, str]:
+    body = (await request.body()).decode("utf-8", errors="replace")
+    return dict(parse_qsl(body, keep_blank_values=True))
+
+
+async def _run_quickstart_demo(db: AsyncSession, client_id: str) -> dict[str, Any]:
+    """Create two agents, one signed handoff, and read the receipt.
+
+    The demo keys are generated here and discarded; production users keep their
+    own private keys via the CLI/SDK.
+    """
+    planner_private = Ed25519PrivateKey.generate()
+    worker_private = Ed25519PrivateKey.generate()
+    planner_public = _public_b64(planner_private)
+    worker_public = _public_b64(worker_private)
+
+    planner = await create_agent(
+        CreateAgentRequest(
+            name="Planner",
+            description="No-code demo planner",
+            capabilities=["plan"],
+            public_key=planner_public,
+        ),
+        client_id=client_id,
+        db=db,
+    )
+    worker = await create_agent(
+        CreateAgentRequest(
+            name="Worker",
+            description="No-code demo worker",
+            capabilities=["read"],
+            public_key=worker_public,
+        ),
+        client_id=client_id,
+        db=db,
+    )
+
+    handoff_id = "h_" + uuid.uuid4().hex
+    created_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    task_hash = hashlib.sha256(b"summarize the quarterly report").hexdigest()
+    scope = {"allowed": ["read"], "max_actions": 2}
+    signed_payload = {
+        "v": 1,
+        "handoff_id": handoff_id,
+        "from_agent_id": planner["agent_id"],
+        "to_agent_id": worker["agent_id"],
+        "task_hash": task_hash,
+        "scope": scope,
+        "created_at": created_at,
+        "parent_handoff_id": "",
+    }
+    signature = _b64e(planner_private.sign(canonical_bytes(signed_payload)))
+    handoff = await create_handoff(
+        planner["agent_id"],
+        CreateHandoffRequest(
+            handoff_id=handoff_id,
+            to_agent_id=worker["agent_id"],
+            task_hash=task_hash,
+            scope=scope,
+            created_at=created_at,
+            signature=signature,
+        ),
+        client_id=client_id,
+        db=db,
+    )
+    receipts = await get_receipts(worker["agent_id"], 10, db)
+    return {
+        "planner_id": planner["agent_id"],
+        "worker_id": worker["agent_id"],
+        "handoff_id": handoff["handoff_id"],
+        "receipt_count": receipts["count"],
+        "card_url": PUBLIC_BASE_URL + "/a/" + quote(planner["agent_id"], safe=""),
+        "receipts_url": PUBLIC_BASE_URL + "/v1/agents/" + quote(worker["agent_id"], safe="") + "/receipts",
+    }
+
+
+@app.get("/quickstart", response_class=HTMLResponse)
+async def quickstart_page() -> HTMLResponse:
+    return HTMLResponse(_quickstart_start_html(), headers=_quickstart_headers())
+
+
+@app.post("/v1/quickstart/start", response_class=HTMLResponse)
+async def quickstart_start(request: Request, db: AsyncSession = Depends(get_db)) -> HTMLResponse:
+    fields = await _quickstart_form_fields(request)
+    try:
+        payload = RegisterClientRequest(email=fields.get("email", ""))
+    except ValidationError:
+        return HTMLResponse(
+            _quickstart_start_html("Enter a valid email address so we can send your code."),
+            status_code=422,
+            headers=_quickstart_headers(),
+        )
+    try:
+        result = await register_client(payload, request, db)
+    except HTTPException as exc:
+        return HTMLResponse(
+            _quickstart_start_html(str(exc.detail)),
+            status_code=exc.status_code,
+            headers=_quickstart_headers(),
+        )
+    result.pop("verification_code", None)
+    return HTMLResponse(
+        _quickstart_code_html(
+            str(result["client_id"]),
+            notice="Code sent. Check your inbox, then paste the 6-digit code below.",
+        ),
+        headers=_quickstart_headers(),
+    )
+
+
+@app.post("/v1/quickstart/finish", response_class=HTMLResponse)
+async def quickstart_finish(request: Request, db: AsyncSession = Depends(get_db)) -> HTMLResponse:
+    fields = await _quickstart_form_fields(request)
+    client_id = fields.get("client_id", "")
+    code = fields.get("code", "")
+    try:
+        verification = await verify_email(
+            VerifyEmailRequest(client_id=client_id, code=code), request, db
+        )
+    except ValidationError:
+        return HTMLResponse(
+            _quickstart_code_html(client_id, error="Enter the exact 6-digit code from your inbox."),
+            status_code=422,
+            headers=_quickstart_headers(),
+        )
+    except HTTPException as exc:
+        return HTMLResponse(
+            _quickstart_code_html(client_id, error=str(exc.detail)),
+            status_code=exc.status_code,
+            headers=_quickstart_headers(),
+        )
+
+    api_key = str(verification.get("api_key", ""))
+    try:
+        demo = await _run_quickstart_demo(db, client_id)
+    except HTTPException as exc:
+        return HTMLResponse(
+            _quickstart_code_html(
+                client_id,
+                error=f"Email verified, but the demo could not run: {exc.detail}",
+                api_key=api_key,
+            ),
+            status_code=exc.status_code,
+            headers=_quickstart_headers(),
+        )
+    demo["client_id"] = client_id
+    demo["api_key"] = api_key
+    return HTMLResponse(_quickstart_done_html(demo), headers=_quickstart_headers())
+
+
+@app.post("/v1/quickstart/resend", response_class=HTMLResponse)
+async def quickstart_resend(request: Request, db: AsyncSession = Depends(get_db)) -> HTMLResponse:
+    fields = await _quickstart_form_fields(request)
+    client_id = fields.get("client_id", "")
+    try:
+        result = await resend_verification(
+            ResendVerificationRequest(client_id=client_id), request, db
+        )
+    except ValidationError:
+        return HTMLResponse(
+            _quickstart_code_html(client_id, error="Invalid client ID."),
+            status_code=422,
+            headers=_quickstart_headers(),
+        )
+    except HTTPException as exc:
+        return HTMLResponse(
+            _quickstart_code_html(client_id, error=str(exc.detail)),
+            status_code=exc.status_code,
+            headers=_quickstart_headers(),
+        )
+    result.pop("verification_code", None)
+    return HTMLResponse(
+        _quickstart_code_html(client_id, notice="A fresh code has been sent."),
+        headers=_quickstart_headers(),
+    )
 
 
 @app.post("/v1/admin/clients/register", status_code=status.HTTP_201_CREATED)
