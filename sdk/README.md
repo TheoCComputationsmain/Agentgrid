@@ -11,7 +11,7 @@ to whom, under what scope, and proving the signed bytes later. Private Ed25519
 keys stay on your machine; only public keys are registered. Cards and handoffs
 are canonical JSON, and receipts are readable by agent ID.
 
-Keywords: `ai-agents` · `agent-handoff` · `ed25519` · `signed-receipts` ·
+Topics: `ai-agents` · `agent-handoff` · `ed25519` · `signed-receipts` ·
 `scope-chain` · `langgraph` · `crewai`
 
 ## Install and make one real handoff
