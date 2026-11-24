@@ -238,6 +238,96 @@ to create your API key. Until then the account cannot be used.</p>
     }
 
 
+def build_pending_verification_reminder(base_url: str = "") -> dict[str, str]:
+    """Build a one-time nudge for signups that never confirmed their email.
+
+    This message never contains a verification code, client ID, or API key.
+    """
+    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    safe_base = html.escape(base)
+
+    text = f"""Hi,
+
+You started setting up AgentGrid, but your email is not verified yet. No API key
+exists until you confirm it.
+
+Open the no-code quickstart, enter the same email, and request a fresh code:
+
+    {base}/quickstart
+
+After confirmation, AgentGrid creates two demo agents, signs a scoped handoff,
+and shows the receipt. No card, wallet, CLI, or API key is needed for the demo.
+
+If you did not start this, you can ignore this email.
+
+— TheoC Computations, AgentGrid
+"""
+
+    html_body = f"""<div style="font:15px/1.6 system-ui;color:#eaf0ff;background:#0b1020;padding:20px">
+<h2>Finish your AgentGrid setup</h2>
+<p>You started setting up AgentGrid, but your email is not verified yet. No API
+key exists until you confirm it.</p>
+<p><a href="{safe_base}/quickstart" style="color:#7ee7c7">Open the no-code quickstart</a>,
+enter the same email, and request a fresh code.</p>
+<p>After confirmation, AgentGrid creates two demo agents, signs a scoped handoff,
+and shows the receipt. No card, wallet, CLI, or API key is needed for the demo.</p>
+<p>If you did not start this, you can ignore this email.</p>
+<p>— TheoC Computations, AgentGrid</p>
+</div>"""
+
+    return {
+        "type": "agentgrid.activation.pending_verification",
+        "subject": "Finish your AgentGrid setup",
+        "text": text,
+        "html": html_body,
+    }
+
+
+def build_inactive_account_reminder(base_url: str = "") -> dict[str, str]:
+    """Build a one-time nudge for verified accounts with no agents yet.
+
+    This message never contains a verification code, client ID, or API key.
+    """
+    base = (base_url or DEFAULT_BASE_URL).rstrip("/")
+    safe_base = html.escape(base)
+
+    text = f"""Hi,
+
+You verified your AgentGrid email, but you have not created a signed handoff yet.
+
+Create your first one in under a minute with the no-code quickstart:
+
+    {base}/quickstart
+
+Enter your email, confirm the 6-digit code, and AgentGrid creates two demo
+agents, signs a scoped handoff, and shows a public receipt you can verify
+without an API key.
+
+If you would rather use the CLI, the developer guide has the three commands:
+{base}/guide
+
+— TheoC Computations, AgentGrid
+"""
+
+    html_body = f"""<div style="font:15px/1.6 system-ui;color:#eaf0ff;background:#0b1020;padding:20px">
+<h2>Create your first AgentGrid handoff</h2>
+<p>You verified your AgentGrid email, but you have not created a signed handoff yet.</p>
+<p><a href="{safe_base}/quickstart" style="color:#7ee7c7">Create your first one in under a minute</a>
+with the no-code quickstart. Confirm the 6-digit code and AgentGrid creates two
+demo agents, signs a scoped handoff, and shows a public receipt you can verify
+without an API key.</p>
+<p>Prefer the CLI? See the <a href="{safe_base}/guide" style="color:#7ee7c7">developer guide</a>.</p>
+<p>— TheoC Computations, AgentGrid</p>
+</div>"""
+
+    return {
+        "type": "agentgrid.activation.first_handoff",
+        "subject": "Create your first AgentGrid handoff",
+        "text": text,
+        "html": html_body,
+    }
+
+
 async def _dispatch(email: str, message: dict[str, str]) -> bool:
     """Send a prepared message through the configured provider."""
     recipient = (email or "").strip().lower()
@@ -328,3 +418,13 @@ async def send_verification_email(
 ) -> bool:
     """Dispatch the one-time human-verification code."""
     return await _dispatch(email, build_verification_message(client_id, code, base_url))
+
+
+async def send_pending_verification_reminder(email: str, base_url: str = "") -> bool:
+    """Dispatch the one-time activation nudge for an unverified signup."""
+    return await _dispatch(email, build_pending_verification_reminder(base_url))
+
+
+async def send_inactive_account_reminder(email: str, base_url: str = "") -> bool:
+    """Dispatch the one-time activation nudge for a verified but idle account."""
+    return await _dispatch(email, build_inactive_account_reminder(base_url))

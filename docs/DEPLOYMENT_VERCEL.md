@@ -58,6 +58,7 @@ committed or printed. The production project has these names configured:
 | `AGENTGRID_ADMIN_MFA_SECRET` | Admin TOTP secret |
 | `AGENTGRID_RATE_LIMIT_PER_MIN` | Shared request limit (120) |
 | `AGENTGRID_SKIP_SCHEMA_ON_STARTUP` | `1` — skip DDL on cold start |
+| `AGENTGRID_CRON_SECRET` | Bearer secret for the daily activation-reminder cron |
 
 Optional: `AGENTGRID_PREVIOUS_SIGNING_KEY_B64` for key rotation,
 `AGENTGRID_CORS_ORIGINS` if a browser client is added, and the two welcome-email
@@ -88,6 +89,29 @@ fails because email failed.
 AgentGrid stores no email-provider credentials in code or the repo, and never
 sees payment details. With none of these set, no email is sent and nothing
 breaks.
+
+## Activation reminders
+
+`vercel.json` schedules one daily cron at 09:00 UTC:
+
+```text
+GET /v1/cron/activation-reminders
+Authorization: Bearer $AGENTGRID_CRON_SECRET
+```
+
+The endpoint sends at most 25 reminders per run:
+
+- unverified signups older than 24 hours
+- verified accounts with zero agents older than 48 hours
+
+Each successful send writes an immutable audit event, so a reminder is never
+sent twice. Test-prefix accounts and disposable emails are skipped. Reminder
+messages never contain verification codes, API keys, or client IDs. The endpoint
+fails closed if `AGENTGRID_CRON_SECRET` is missing or the bearer token is wrong.
+
+Quickstart `?ref=` values are stored as audit metadata and shown as counts in
+`/ops-lite` under **Referral sources**. Values are normalized to lowercase
+letters, numbers, `_`, and `-`, up to 64 characters.
 
 ## Verify a deployment
 

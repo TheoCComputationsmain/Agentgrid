@@ -22,6 +22,7 @@ os.environ["AGENTGRID_ADMIN_KEY"] = "test-admin-key"
 os.environ["AGENTGRID_ADMIN_MFA_SECRET"] = "JBSWY3DPEHPK3PXP"
 os.environ["AGENTGRID_OPS_LITE_KEY"] = "test-read-key"
 os.environ["AGENTGRID_OPS_LITE_CATCH"] = "test-catch-phrase"
+os.environ["AGENTGRID_CRON_SECRET"] = "test-cron-secret"
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -29,6 +30,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from fastapi.testclient import TestClient
 
 import main
+import welcome_email
 
 
 @pytest.fixture(scope="module")
@@ -83,6 +85,37 @@ def _register(api, client_id=None, email=None):
 
 def _headers(api_key):
     return {"X-AgentGrid-API-Key": api_key}
+
+
+def _insert_stale_client(client_id: str, email: str, *, verified: bool) -> None:
+    """Insert an old public-style account directly for activation reminders."""
+    created_at = (datetime.now(timezone.utc) - timedelta(days=3)).isoformat()
+    today = date.today().isoformat()
+    connection = sqlite3.connect(TEST_DB_PATH)
+    try:
+        connection.execute(
+            """
+            INSERT INTO clients (
+                client_id, api_key_hash, email, email_verified,
+                verification_code_hash, verification_expires_at, verification_sent_at,
+                verification_attempts, tier, handoffs_used, period_month,
+                cycle_start, cycle_end, cycle_tier, access_expires_at, created_at
+            ) VALUES (?, ?, ?, ?, NULL, NULL, NULL, 0, 'free', 0, ?, ?, ?, 'free', NULL, ?)
+            """,
+            (
+                client_id,
+                hashlib.sha256(client_id.encode("utf-8")).hexdigest(),
+                email,
+                1 if verified else 0,
+                today[:7],
+                today,
+                (date.today() + timedelta(days=365)).isoformat(),
+                created_at,
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
 
 
 def _create_agent(api, api_key, name="Agent", capabilities=None):
@@ -246,6 +279,103 @@ def test_no_code_quickstart_creates_real_handoff(api, monkeypatch):
     assert len(handoffs) == 1
 
 
+def test_quickstart_ref_tracking_is_hidden_and_sanitized(api, monkeypatch):
+    ref = "devto_" + uuid.uuid4().hex[:12]
+    page = api.get("/quickstart?ref=" + ref)
+    assert page.status_code == 200
+    assert 'name="ref" value="' + ref + '"' in page.text
+
+    hostile = api.get("/quickstart?ref=%3Cscript%3Ealert(1)%3C%2Fscript%3E")
+    assert "<script>" not in hostile.text
+    assert 'name="ref" value=""' not in hostile.text
+
+    captured: dict[str, str] = {}
+
+    async def capture_code(email, client_id, code, base_url):
+        captured["code"] = code
+
+    monkeypatch.setattr(main, "send_verification_email", capture_code)
+    started = api.post(
+        "/v1/quickstart/start",
+        data={"email": f"ref_{uuid.uuid4().hex}@example.test", "ref": ref},
+    )
+    assert started.status_code == 200, started.text
+    assert 'name="ref" value="' + ref + '"' in started.text
+
+    stats = api.get(
+        "/v1/admin/stats",
+        headers={
+            "X-AgentGrid-Admin-Key": "test-admin-key",
+            "X-AgentGrid-Admin-MFA": _totp(),
+        },
+    )
+    assert stats.status_code == 200, stats.text
+    assert stats.json()["referral_sources"].get(ref, 0) >= 1
+
+
+def test_activation_reminder_messages_never_include_secrets():
+    messages = (
+        welcome_email.build_pending_verification_reminder(),
+        welcome_email.build_inactive_account_reminder(),
+    )
+    for message in messages:
+        for field in ("text", "html"):
+            assert "agk_" not in message[field]
+            assert not re.search(r"\b\d{6}\b", message[field])
+        assert "— TheoC Computations, AgentGrid" in message["text"]
+        assert "— TheoC Computations, AgentGrid" in message["html"]
+
+
+def test_activation_reminders_send_once_and_dedupe(api, monkeypatch):
+    pending_id = "remindpending_" + uuid.uuid4().hex[:8]
+    inactive_id = "remindinactive_" + uuid.uuid4().hex[:8]
+    pending_email = pending_id + "@example.test"
+    inactive_email = inactive_id + "@example.test"
+    _insert_stale_client(pending_id, pending_email, verified=False)
+    _insert_stale_client(inactive_id, inactive_email, verified=True)
+
+    sent: list[tuple[str, str]] = []
+
+    async def capture_pending(email, base_url=""):
+        sent.append(("pending", email))
+        return True
+
+    async def capture_inactive(email, base_url=""):
+        sent.append(("inactive", email))
+        return True
+
+    monkeypatch.setattr(main, "send_pending_verification_reminder", capture_pending)
+    monkeypatch.setattr(main, "send_inactive_account_reminder", capture_inactive)
+
+    unauthorized = api.get(
+        "/v1/cron/activation-reminders",
+        headers={"Authorization": "Bearer wrong-secret"},
+    )
+    assert unauthorized.status_code == 401
+
+    auth = {"Authorization": "Bearer test-cron-secret"}
+    first = api.get("/v1/cron/activation-reminders", headers=auth)
+    assert first.status_code == 200, first.text
+    assert first.json()["pending_sent"] >= 1
+    assert first.json()["inactive_sent"] >= 1
+    assert pending_email not in first.text
+    assert inactive_email not in first.text
+    assert ("pending", pending_email) in sent
+    assert ("inactive", inactive_email) in sent
+
+    sent.clear()
+    second = api.get("/v1/cron/activation-reminders", headers=auth)
+    assert second.status_code == 200, second.text
+    assert second.json()["pending_sent"] == 0
+    assert second.json()["inactive_sent"] == 0
+    assert sent == []
+
+    pending_actions = _sqlite_rows(
+        "SELECT action FROM audit_events WHERE client_id = ?", (pending_id,)
+    )
+    assert [row["action"] for row in pending_actions] == [main.PENDING_REMINDER_ACTION]
+
+
 def test_open_registration_and_api_key_auth(api):
     # Public self-service registration needs no invite token.
     unauthenticated = api.get("/v1/clients/me")
@@ -334,7 +464,7 @@ def test_agent_card_signature_and_verification(api):
     assert page.status_code == 200
     assert "AgentGrid verified card" in page.text
     assert "Share this card" in page.text
-    assert 'href="/quickstart"' in page.text
+    assert 'href="/quickstart?ref=shared-card"' in page.text
 
 
 def test_agent_overage_hard_cap_and_upgrade(api, monkeypatch):

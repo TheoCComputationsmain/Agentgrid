@@ -5,6 +5,7 @@ operator grants access with an admin key plus TOTP.
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import calendar
@@ -29,7 +30,12 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey, Ed25519PublicKey
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from welcome_email import send_verification_email, send_welcome_email
+from welcome_email import (
+    send_inactive_account_reminder,
+    send_pending_verification_reminder,
+    send_verification_email,
+    send_welcome_email,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from pydantic import BaseModel, Field, ValidationError
@@ -85,6 +91,17 @@ OPS_LITE_CATCH = os.environ.get("AGENTGRID_OPS_LITE_CATCH", "")
 OPS_LITE_FRAME_ANCESTORS = (
     os.environ.get("AGENTGRID_OPS_LITE_FRAME_ANCESTORS", "'self'").strip() or "'self'"
 )
+
+# Vercel Cron calls the reminder endpoint with `Authorization: Bearer <secret>`.
+# The secret is read at request time so deployments can change it without code.
+CRON_SECRET_ENV = "AGENTGRID_CRON_SECRET"
+PENDING_REMINDER_AFTER_HOURS = 24
+INACTIVE_REMINDER_AFTER_HOURS = 48
+ACTIVATION_REMINDER_LIMIT = 25
+PENDING_REMINDER_ACTION = "activation.reminder.pending"
+INACTIVE_REMINDER_ACTION = "activation.reminder.inactive"
+REFERRAL_AUDIT_ACTION = "client.referral"
+SAFE_REF_PATTERN = re.compile(r"^[a-z0-9_-]{1,64}$")
 
 TIER_LIMITS = {
     "free": {"agents": 5, "handoffs": 100},
@@ -157,6 +174,12 @@ SKIP_SCHEMA_ON_STARTUP = os.environ.get(
     "AGENTGRID_SKIP_SCHEMA_ON_STARTUP", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
 SENSITIVE_KEY_FRAGMENTS = ("key", "token", "password", "secret", "authorization", "cookie", "credential")
+
+
+def _normalize_ref(value: Any) -> str:
+    """Normalize an optional ?ref= value to a safe, short attribution tag."""
+    candidate = str(value or "").strip().lower()
+    return candidate if SAFE_REF_PATTERN.fullmatch(candidate) else ""
 
 
 def _safe_audit_metadata(metadata: Optional[dict[str, Any]]) -> dict[str, Any]:
@@ -2415,8 +2438,14 @@ def _quickstart_shell(title: str, body: str) -> str:
 <title>{html.escape(title)}</title>{QUICKSTART_STYLE}</head><body><div class="wrap">{body}</div></body></html>"""
 
 
-def _quickstart_start_html(error: str = "") -> str:
+def _quickstart_start_html(error: str = "", ref: str = "") -> str:
     error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
+    safe_ref = _normalize_ref(ref)
+    ref_html = (
+        f'<input type="hidden" name="ref" value="{html.escape(safe_ref, quote=True)}">'
+        if safe_ref
+        else ""
+    )
     return _quickstart_shell(
         "AgentGrid · No-code quickstart",
         f"""
@@ -2426,6 +2455,7 @@ def _quickstart_start_html(error: str = "") -> str:
 {error_html}
 <div class="card">
 <form method="post" action="/v1/quickstart/start">
+{ref_html}
 <label for="email">Email address</label>
 <input id="email" name="email" type="email" autocomplete="email" required maxlength="320">
 <button type="submit">Send verification code</button>
@@ -2439,7 +2469,12 @@ needed for this demo. For production use, the CLI/SDK keeps private keys on your
 
 
 def _quickstart_code_html(
-    client_id: str, error: str = "", notice: str = "", *, api_key: str = ""
+    client_id: str,
+    error: str = "",
+    notice: str = "",
+    *,
+    api_key: str = "",
+    ref: str = "",
 ) -> str:
     error_html = f'<div class="error">{html.escape(error)}</div>' if error else ""
     notice_html = f'<div class="note">{html.escape(notice)}</div>' if notice else ""
@@ -2451,22 +2486,31 @@ def _quickstart_code_html(
             "<p class='muted'>Store it privately. It is shown only once.</p></details>"
         )
     safe_id = html.escape(client_id, quote=True)
+    safe_ref = _normalize_ref(ref)
+    ref_html = (
+        f'<input type="hidden" name="ref" value="{html.escape(safe_ref, quote=True)}">'
+        if safe_ref
+        else ""
+    )
+    start_url = "/quickstart" + (f"?ref={quote(safe_ref, safe='')}" if safe_ref else "")
     return _quickstart_shell(
         "AgentGrid · Check your inbox",
         f"""
-<p><a href="/quickstart">&larr; Start over</a></p>
+<p><a href="{start_url}">&larr; Start over</a></p>
 <h1>Check your inbox</h1>
 <p class="muted">Client ID: <code>{safe_id}</code></p>
 {error_html}{notice_html}
 <div class="card">
 <form method="post" action="/v1/quickstart/finish">
 <input type="hidden" name="client_id" value="{safe_id}">
+{ref_html}
 <label for="code">6-digit code</label>
 <input id="code" name="code" inputmode="numeric" pattern="[0-9]{{6}}" maxlength="6" minlength="6" autocomplete="one-time-code" required>
 <button type="submit">Verify and create my handoff</button>
 </form>
 <form method="post" action="/v1/quickstart/resend">
 <input type="hidden" name="client_id" value="{safe_id}">
+{ref_html}
 <button type="submit">Resend code</button>
 </form>
 </div>
@@ -2490,7 +2534,7 @@ def _quickstart_done_html(result: dict[str, Any]) -> str:
     card_url = html.escape(str(result["card_url"]), quote=True)
     receipts_url = html.escape(str(result["receipts_url"]), quote=True)
     api_key = html.escape(str(result.get("api_key", "")), quote=True)
-    quickstart_url = html.escape(PUBLIC_BASE_URL + "/quickstart", quote=True)
+    quickstart_url = html.escape(PUBLIC_BASE_URL + "/quickstart?ref=receipt-loop", quote=True)
     key_html = (
         f"<details><summary>API key for CLI/SDK use (optional)</summary><p><code>{api_key}</code></p>"
         "<p class='muted'>Store it privately. It is shown only once.</p></details>"
@@ -2603,18 +2647,19 @@ async def _run_quickstart_demo(db: AsyncSession, client_id: str) -> dict[str, An
 
 
 @app.get("/quickstart", response_class=HTMLResponse)
-async def quickstart_page() -> HTMLResponse:
-    return HTMLResponse(_quickstart_start_html(), headers=_quickstart_headers())
+async def quickstart_page(ref: str = "") -> HTMLResponse:
+    return HTMLResponse(_quickstart_start_html(ref=ref), headers=_quickstart_headers())
 
 
 @app.post("/v1/quickstart/start", response_class=HTMLResponse)
 async def quickstart_start(request: Request, db: AsyncSession = Depends(get_db)) -> HTMLResponse:
     fields = await _quickstart_form_fields(request)
+    ref = _normalize_ref(fields.get("ref", ""))
     try:
         payload = RegisterClientRequest(email=fields.get("email", ""))
     except ValidationError:
         return HTMLResponse(
-            _quickstart_start_html("Enter a valid email address so we can send your code."),
+            _quickstart_start_html("Enter a valid email address so we can send your code.", ref=ref),
             status_code=422,
             headers=_quickstart_headers(),
         )
@@ -2622,15 +2667,27 @@ async def quickstart_start(request: Request, db: AsyncSession = Depends(get_db))
         result = await register_client(payload, request, db)
     except HTTPException as exc:
         return HTMLResponse(
-            _quickstart_start_html(str(exc.detail)),
+            _quickstart_start_html(str(exc.detail), ref=ref),
             status_code=exc.status_code,
             headers=_quickstart_headers(),
         )
+    client_id = str(result["client_id"])
+    if ref:
+        record_audit(
+            db,
+            client_id=client_id,
+            action=REFERRAL_AUDIT_ACTION,
+            target_type="client",
+            target_id=client_id,
+            metadata={"ref": ref},
+        )
+        await db.commit()
     result.pop("verification_code", None)
     return HTMLResponse(
         _quickstart_code_html(
-            str(result["client_id"]),
+            client_id,
             notice="Code sent. Check your inbox, then paste the 6-digit code below.",
+            ref=ref,
         ),
         headers=_quickstart_headers(),
     )
@@ -2641,19 +2698,22 @@ async def quickstart_finish(request: Request, db: AsyncSession = Depends(get_db)
     fields = await _quickstart_form_fields(request)
     client_id = fields.get("client_id", "")
     code = fields.get("code", "")
+    ref = _normalize_ref(fields.get("ref", ""))
     try:
         verification = await verify_email(
             VerifyEmailRequest(client_id=client_id, code=code), request, db
         )
     except ValidationError:
         return HTMLResponse(
-            _quickstart_code_html(client_id, error="Enter the exact 6-digit code from your inbox."),
+            _quickstart_code_html(
+                client_id, error="Enter the exact 6-digit code from your inbox.", ref=ref
+            ),
             status_code=422,
             headers=_quickstart_headers(),
         )
     except HTTPException as exc:
         return HTMLResponse(
-            _quickstart_code_html(client_id, error=str(exc.detail)),
+            _quickstart_code_html(client_id, error=str(exc.detail), ref=ref),
             status_code=exc.status_code,
             headers=_quickstart_headers(),
         )
@@ -2667,6 +2727,7 @@ async def quickstart_finish(request: Request, db: AsyncSession = Depends(get_db)
                 client_id,
                 error=f"Email verified, but the demo could not run: {exc.detail}",
                 api_key=api_key,
+                ref=ref,
             ),
             status_code=exc.status_code,
             headers=_quickstart_headers(),
@@ -2680,25 +2741,26 @@ async def quickstart_finish(request: Request, db: AsyncSession = Depends(get_db)
 async def quickstart_resend(request: Request, db: AsyncSession = Depends(get_db)) -> HTMLResponse:
     fields = await _quickstart_form_fields(request)
     client_id = fields.get("client_id", "")
+    ref = _normalize_ref(fields.get("ref", ""))
     try:
         result = await resend_verification(
             ResendVerificationRequest(client_id=client_id), request, db
         )
     except ValidationError:
         return HTMLResponse(
-            _quickstart_code_html(client_id, error="Invalid client ID."),
+            _quickstart_code_html(client_id, error="Invalid client ID.", ref=ref),
             status_code=422,
             headers=_quickstart_headers(),
         )
     except HTTPException as exc:
         return HTMLResponse(
-            _quickstart_code_html(client_id, error=str(exc.detail)),
+            _quickstart_code_html(client_id, error=str(exc.detail), ref=ref),
             status_code=exc.status_code,
             headers=_quickstart_headers(),
         )
     result.pop("verification_code", None)
     return HTMLResponse(
-        _quickstart_code_html(client_id, notice="A fresh code has been sent."),
+        _quickstart_code_html(client_id, notice="A fresh code has been sent.", ref=ref),
         headers=_quickstart_headers(),
     )
 
@@ -3024,7 +3086,7 @@ async def agent_card_page(agent_id: str, db: AsyncSession = Depends(get_db)) -> 
 <p><a href="/v1/agents/{html.escape(agent_id)}/verify">Verify</a> &middot;
 <a href="/v1/agents/{html.escape(agent_id)}.json">JSON</a></p>
 <p class="badge"><strong>Share this card:</strong> <code>{html.escape(card_url, quote=True)}</code></p>
-<p>Want your own signed card and handoff? <a href="/quickstart">Run the no-code quickstart</a> —
+<p>Want your own signed card and handoff? <a href="/quickstart?ref=shared-card">Run the no-code quickstart</a> —
 no code, CLI, or API key needed.</p></body></html>"""
 
 
@@ -3535,6 +3597,14 @@ def _ops_lite_dashboard_html(stats: dict[str, Any], clients: list[dict[str, Any]
             "</tr>"
         )
     table_rows = "".join(rows) or '<tr><td colspan="7" class="muted">No clients yet.</td></tr>'
+    referral_rows_html = "".join(
+        "<tr><td><code>"
+        + _lite_esc(source)
+        + "</code></td><td>"
+        + _lite_esc(count)
+        + "</td></tr>"
+        for source, count in stats.get("referral_sources", {}).items()
+    ) or '<tr><td colspan="2" class="muted">No ?ref= sources yet.</td></tr>'
     generated = _lite_esc(stats.get("generated_at"))
     return _ops_lite_shell(
         "AgentGrid · Snapshot",
@@ -3544,6 +3614,9 @@ def _ops_lite_dashboard_html(stats: dict[str, Any], clients: list[dict[str, Any]
 <form method="post" action="/v1/ops-lite/logout"><button type="submit">Sign out</button></form>
 </div>
 <div class="grid">{cards}</div>
+<h2>Referral sources</h2>
+<table><thead><tr><th>Source</th><th>Quickstart starts</th></tr></thead>
+<tbody>{referral_rows_html}</tbody></table>
 <h2>Recent clients</h2>
 <table><thead><tr><th>Client ID</th><th>Email</th><th>Signal</th><th>Tier</th><th>Agents</th><th>Handoffs</th><th>Created</th></tr></thead>
 <tbody>{table_rows}</tbody></table>
@@ -3672,6 +3745,133 @@ async def ops_lite_client_page(
     return HTMLResponse(_ops_lite_detail_html(detail), headers=_ops_lite_headers())
 
 
+def _authorize_cron(request: Request) -> None:
+    """Vercel Cron uses a bearer secret; no other caller can trigger reminders."""
+    configured = os.environ.get(CRON_SECRET_ENV, "").strip()
+    if not configured:
+        raise HTTPException(status_code=503, detail="Cron secret is not configured.")
+    header = request.headers.get("Authorization", "")
+    supplied = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    if not supplied or not hmac.compare_digest(supplied, configured):
+        raise HTTPException(status_code=401, detail="Invalid cron credentials.")
+
+
+async def _send_activation_reminder(action: str, email: str) -> bool:
+    """Send one reminder through the configured provider, best-effort."""
+    try:
+        if action == PENDING_REMINDER_ACTION:
+            return bool(await send_pending_verification_reminder(email, PUBLIC_BASE_URL))
+        return bool(await send_inactive_account_reminder(email, PUBLIC_BASE_URL))
+    except Exception as exc:  # noqa: BLE001 - a cron email must not break the endpoint
+        logger.warning("Activation reminder failed (%s)", type(exc).__name__)
+        return False
+
+
+@app.get("/v1/cron/activation-reminders")
+async def activation_reminders(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> JSONResponse:
+    """Send one-time activation nudges to stale public accounts.
+
+    Pending verification: older than 24 hours.
+    Verified but no agents: older than 48 hours.
+
+    Every successful send writes an immutable audit event, so a later run will
+    never send the same reminder twice. No codes, keys, or customer details are
+    logged or returned.
+    """
+    _authorize_cron(request)
+
+    now = datetime.now(timezone.utc)
+    pending_cutoff = now - timedelta(hours=PENDING_REMINDER_AFTER_HOURS)
+    inactive_cutoff = now - timedelta(hours=INACTIVE_REMINDER_AFTER_HOURS)
+    client_rows = await db.execute(
+        select(ClientModel).order_by(ClientModel.created_at.asc()).limit(1_000)
+    )
+    clients = client_rows.scalars().all()
+
+    agent_rows = await db.execute(
+        select(AgentModel.client_id, func.count(AgentModel.agent_id)).group_by(AgentModel.client_id)
+    )
+    agent_counts = {str(client_id): int(count) for client_id, count in agent_rows.all()}
+
+    candidate_ids = [client.client_id for client in clients]
+    sent_rows = await db.execute(
+        select(AuditEventModel.client_id, AuditEventModel.action).where(
+            AuditEventModel.client_id.in_(candidate_ids),
+            AuditEventModel.action.in_((PENDING_REMINDER_ACTION, INACTIVE_REMINDER_ACTION)),
+        )
+    )
+    already_sent = {(str(client_id), str(action)) for client_id, action in sent_rows.all()}
+
+    pending_targets: list[tuple[ClientModel, str]] = []
+    inactive_targets: list[tuple[ClientModel, str]] = []
+    for client in clients:
+        if client.client_id.startswith(OPERATOR_TEST_PREFIXES):
+            continue
+        if not client.email or _email_is_disposable(client.email):
+            continue
+        try:
+            created = _parse_iso(client.created_at)
+        except (TypeError, ValueError):
+            continue
+        if not created:
+            continue
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+
+        if not client.email_verified:
+            if created <= pending_cutoff and (client.client_id, PENDING_REMINDER_ACTION) not in already_sent:
+                pending_targets.append((client, PENDING_REMINDER_ACTION))
+        elif (
+            created <= inactive_cutoff
+            and agent_counts.get(client.client_id, 0) == 0
+            and (client.client_id, INACTIVE_REMINDER_ACTION) not in already_sent
+        ):
+            inactive_targets.append((client, INACTIVE_REMINDER_ACTION))
+
+    targets = (pending_targets + inactive_targets)[:ACTIVATION_REMINDER_LIMIT]
+    outcomes = await asyncio.gather(
+        *[_send_activation_reminder(action, client.email or "") for client, action in targets],
+        return_exceptions=True,
+    )
+
+    sent_pending = 0
+    sent_inactive = 0
+    failed = 0
+    for (client, action), outcome in zip(targets, outcomes):
+        if outcome is not True:
+            failed += 1
+            continue
+        record_audit(
+            db,
+            client_id=client.client_id,
+            action=action,
+            target_type="client",
+            target_id=client.client_id,
+            metadata={"stage": "activation"},
+        )
+        if action == PENDING_REMINDER_ACTION:
+            sent_pending += 1
+        else:
+            sent_inactive += 1
+    await db.commit()
+
+    return JSONResponse(
+        {
+            "status": "ok",
+            "pending_candidates": len(pending_targets),
+            "inactive_candidates": len(inactive_targets),
+            "pending_sent": sent_pending,
+            "inactive_sent": sent_inactive,
+            "failed": failed,
+            "limit": ACTIVATION_REMINDER_LIMIT,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 def _signup_signal(client: ClientModel, agent_count: int, handoff_count: int) -> str:
     if not client.email_verified:
         return "pending_verification"
@@ -3793,6 +3993,21 @@ async def admin_stats(
     )
     handoff_counts = {str(client_id): int(count) for client_id, count in handoff_rows.all()}
 
+    referral_rows = await db.execute(
+        select(AuditEventModel.metadata_json).where(
+            AuditEventModel.action == REFERRAL_AUDIT_ACTION
+        )
+    )
+    referral_counts: dict[str, int] = {}
+    for (raw_metadata,) in referral_rows.all():
+        try:
+            source = json.loads(raw_metadata).get("ref")
+        except (TypeError, ValueError):
+            continue
+        safe_source = _normalize_ref(source)
+        if safe_source:
+            referral_counts[safe_source] = referral_counts.get(safe_source, 0) + 1
+
     def summarize(rows: list[ClientModel]) -> dict[str, Any]:
         tiers = {name: 0 for name in TIER_LIMITS}
         paid_active = 0
@@ -3839,6 +4054,9 @@ async def admin_stats(
         "unverified_signups": len(public_clients) - len(verified_public_clients),
         "test_accounts_excluded": len(clients) - len(public_clients),
         "excluded_prefixes": list(OPERATOR_TEST_PREFIXES),
+        "referral_sources": dict(
+            sorted(referral_counts.items(), key=lambda item: (-item[1], item[0]))
+        ),
     }
 
 
