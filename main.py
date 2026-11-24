@@ -1808,7 +1808,6 @@ footer{color:var(--muted);font-size:12px;margin-top:22px}
         <span class="badge bad">Disposable-looking email</span>
         <span class="badge bad">Legacy &middot; no email</span>
       </div>
-      <label class="check"><input id="include-tests" type="checkbox"> Include operator/test accounts</label>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>Client ID</th><th>Created</th><th>Email</th><th>Verified</th><th>Agents</th><th>Handoffs</th><th>Last activity</th><th>Signal</th></tr></thead>
@@ -1822,7 +1821,7 @@ footer{color:var(--muted);font-size:12px;margin-top:22px}
 </div>
 <script>
 const el = (id) => document.getElementById(id);
-const state = {stats:null, clients:[], timer:null, paused:false, includeTests:false};
+const state = {stats:null, clients:[], timer:null, paused:false};
 
 function setStatus(text, ok) {
   const s = el('status');
@@ -1905,7 +1904,7 @@ function renderCards() {
 function renderTable() {
   const body = el('rows');
   body.replaceChildren();
-  const rows = state.clients.filter((c) => state.includeTests || !c.is_test_account);
+  const rows = state.clients.filter((c) => !c.is_test_account);
   for (const c of rows) {
     const tr = document.createElement('tr');
     const id = document.createElement('td');
@@ -1982,10 +1981,6 @@ el('toggle').onclick = () => {
   el('toggle').textContent = state.paused ? 'Resume' : 'Pause';
   schedule();
   load();
-};
-el('include-tests').onchange = (e) => {
-  state.includeTests = e.target.checked;
-  renderTable();
 };
 el('signout').onclick = async () => {
   await fetch('/v1/admin/session/logout', {method: 'POST', credentials: 'include'});

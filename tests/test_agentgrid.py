@@ -1358,6 +1358,8 @@ def test_ops_live_page_and_read_only_session(api):
     assert "TheoC Computations" in page.text
     assert "Signup authenticity signals" in page.text
     assert "auto-refresh" in page.text
+    assert "Include operator/test accounts" not in page.text
+    assert "!c.is_test_account" in page.text
 
     assert api.get("/v1/admin/stats").status_code == 401
     denied = api.post(
