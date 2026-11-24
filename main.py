@@ -1808,6 +1808,7 @@ footer{color:var(--muted);font-size:12px;margin-top:22px}
         <span class="badge bad">Disposable-looking email</span>
         <span class="badge bad">Legacy &middot; no email</span>
       </div>
+      <label class="check"><input id="include-tests" type="checkbox"> Include operator/test accounts</label>
       <div style="overflow:auto">
         <table>
           <thead><tr><th>Client ID</th><th>Created</th><th>Email</th><th>Verified</th><th>Agents</th><th>Handoffs</th><th>Last activity</th><th>Signal</th></tr></thead>
@@ -1821,7 +1822,7 @@ footer{color:var(--muted);font-size:12px;margin-top:22px}
 </div>
 <script>
 const el = (id) => document.getElementById(id);
-const state = {stats:null, clients:[], timer:null, paused:false};
+const state = {stats:null, clients:[], timer:null, paused:false, includeTests:false};
 
 function setStatus(text, ok) {
   const s = el('status');
@@ -1904,7 +1905,7 @@ function renderCards() {
 function renderTable() {
   const body = el('rows');
   body.replaceChildren();
-  const rows = state.clients.filter((c) => !c.is_test_account);
+  const rows = state.clients.filter((c) => state.includeTests || !c.is_test_account);
   for (const c of rows) {
     const tr = document.createElement('tr');
     const id = document.createElement('td');
@@ -1981,6 +1982,10 @@ el('toggle').onclick = () => {
   el('toggle').textContent = state.paused ? 'Resume' : 'Pause';
   schedule();
   load();
+};
+el('include-tests').onchange = (e) => {
+  state.includeTests = e.target.checked;
+  renderTable();
 };
 el('signout').onclick = async () => {
   await fetch('/v1/admin/session/logout', {method: 'POST', credentials: 'include'});
@@ -3160,16 +3165,18 @@ def _ops_lite_stat(label: str, value: Any) -> str:
 
 def _ops_lite_dashboard_html(stats: dict[str, Any], clients: list[dict[str, Any]]) -> str:
     public = stats.get("public_users", {})
-    all_accounts = stats.get("all_accounts", {})
+    # This view is for real accounts only. Operator/test accounts remain in the
+    # database for audit and billing history, but never render here.
+    clients = [client for client in clients if not client.get("is_test_account")]
     cards = "".join(
         [
             _ops_lite_stat("Public users", public.get("total", 0)),
             _ops_lite_stat("Verified", public.get("verified", 0)),
             _ops_lite_stat("Pending", stats.get("unverified_signups", 0)),
             _ops_lite_stat("Active users", public.get("active_users", 0)),
+            _ops_lite_stat("Paid active", public.get("paid_active", 0)),
             _ops_lite_stat("Agents", public.get("agents", 0)),
             _ops_lite_stat("Handoffs", public.get("handoffs", 0)),
-            _ops_lite_stat("All accounts", all_accounts.get("total", 0)),
         ]
     )
     rows = []
@@ -3307,6 +3314,12 @@ async def ops_lite_client_page(
 ) -> HTMLResponse:
     if not _ops_lite_authorized(request):
         return HTMLResponse(_ops_lite_login_html(), headers=_ops_lite_headers())
+    if client_id.startswith(OPERATOR_TEST_PREFIXES):
+        body = _ops_lite_shell(
+            "AgentGrid · Not found",
+            '<p><a href="/ops-lite">← Back to snapshot</a></p><h1>Client not found</h1>',
+        )
+        return HTMLResponse(body, status_code=404, headers=_ops_lite_headers())
     try:
         detail = await admin_client_status(client_id, authorized=True, db=db)
     except HTTPException as exc:

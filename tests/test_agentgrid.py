@@ -173,8 +173,16 @@ def test_ops_lite_single_step_snapshot(api):
     dashboard = api.get("/ops-lite")
     assert dashboard.status_code == 200
     assert "Public users" in dashboard.text
+    assert "Paid active" in dashboard.text
+    assert "All accounts" not in dashboard.text
     assert "Recent clients" in dashboard.text
     assert "Sign out" in dashboard.text
+
+    test_client = _register(api, client_id="smoke_ops_lite_" + uuid.uuid4().hex[:8])
+    hidden = api.get("/ops-lite")
+    assert test_client["client_id"] not in hidden.text
+    hidden_detail = api.get(f"/ops-lite/client/{test_client['client_id']}")
+    assert hidden_detail.status_code == 404
 
     stats = api.get("/v1/admin/stats")
     assert stats.status_code == 200
@@ -1358,8 +1366,8 @@ def test_ops_live_page_and_read_only_session(api):
     assert "TheoC Computations" in page.text
     assert "Signup authenticity signals" in page.text
     assert "auto-refresh" in page.text
-    assert "Include operator/test accounts" not in page.text
-    assert "!c.is_test_account" in page.text
+    assert "Include operator/test accounts" in page.text
+    assert "state.includeTests || !c.is_test_account" in page.text
 
     assert api.get("/v1/admin/stats").status_code == 401
     denied = api.post(
