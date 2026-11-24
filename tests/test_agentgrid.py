@@ -308,7 +308,11 @@ def test_agent_overage_hard_cap_and_upgrade(api, monkeypatch):
             "X-AgentGrid-Admin-Key": "test-admin-key",
             "X-AgentGrid-Admin-MFA": _totp(),
         },
-        json={"tier": "plus", "cashfree_order_id": "order_upgrade_" + uuid.uuid4().hex},
+        json={
+            "tier": "plus",
+            "cashfree_order_id": "order_upgrade_" + uuid.uuid4().hex,
+            "cashfree_payment_id": "pay_upgrade_" + uuid.uuid4().hex,
+        },
     )
     assert grant.status_code == 200, grant.text
     assert grant.json()["tier"] == "plus"
@@ -403,7 +407,11 @@ def test_admin_grant_requires_totp_and_is_idempotent(api):
     missing_mfa = api.post(
         f"/v1/admin/clients/{client['client_id']}/grant-access",
         headers={"X-AgentGrid-Admin-Key": "test-admin-key"},
-        json={"tier": "enterprise", "cashfree_order_id": order_id},
+        json={
+            "tier": "enterprise",
+            "cashfree_order_id": order_id,
+            "cashfree_payment_id": "pay_" + order_id,
+        },
     )
     assert missing_mfa.status_code == 401
 
@@ -411,7 +419,11 @@ def test_admin_grant_requires_totp_and_is_idempotent(api):
     first = api.post(
         f"/v1/admin/clients/{client['client_id']}/grant-access",
         headers=headers,
-        json={"tier": "enterprise", "cashfree_order_id": order_id},
+        json={
+            "tier": "enterprise",
+            "cashfree_order_id": order_id,
+            "cashfree_payment_id": "pay_" + order_id,
+        },
     )
     assert first.status_code == 200
     assert first.json()["duplicate"] is False
@@ -419,7 +431,11 @@ def test_admin_grant_requires_totp_and_is_idempotent(api):
     second = api.post(
         f"/v1/admin/clients/{client['client_id']}/grant-access",
         headers=headers,
-        json={"tier": "enterprise", "cashfree_order_id": order_id},
+        json={
+            "tier": "enterprise",
+            "cashfree_order_id": order_id,
+            "cashfree_payment_id": "pay_" + order_id,
+        },
     )
     assert second.status_code == 200
     assert second.json()["duplicate"] is True
@@ -427,9 +443,27 @@ def test_admin_grant_requires_totp_and_is_idempotent(api):
     conflict = api.post(
         f"/v1/admin/clients/{_register(api)['client_id']}/grant-access",
         headers=headers,
-        json={"tier": "pro", "cashfree_order_id": order_id},
+        json={
+            "tier": "pro",
+            "cashfree_order_id": order_id,
+            "cashfree_payment_id": "pay_conflict_" + uuid.uuid4().hex,
+        },
     )
     assert conflict.status_code == 409
+
+    comp = api.post(
+        f"/v1/admin/clients/{_register(api)['client_id']}/grant-access",
+        headers=headers,
+        json={
+            "tier": "plus",
+            "cashfree_order_id": "order_comp_" + uuid.uuid4().hex,
+            "cashfree_payment_id": "pay_comp_" + uuid.uuid4().hex,
+            "grant_reason": "operator_comp",
+            "reason_note": "support exception",
+        },
+    )
+    assert comp.status_code == 200, comp.text
+    assert comp.json()["grant_source"] == "operator_comp"
 
 
 def _create_agent_with_key(api, api_key, name="Agent"):
@@ -963,7 +997,11 @@ def test_record_payment_rejects_open_cycle(api):
 def test_admin_grant_failure_paths(api, monkeypatch):
     client = _register(api)
     url = f"/v1/admin/clients/{client['client_id']}/grant-access"
-    valid = {"tier": "pro", "cashfree_order_id": "order_" + uuid.uuid4().hex}
+    valid = {
+        "tier": "pro",
+        "cashfree_order_id": "order_" + uuid.uuid4().hex,
+        "cashfree_payment_id": "pay_" + uuid.uuid4().hex,
+    }
 
     wrong_key = api.post(
         url,
@@ -988,6 +1026,20 @@ def test_admin_grant_failure_paths(api, monkeypatch):
 
     invalid_order = api.post(url, headers=headers, json={**valid, "cashfree_order_id": "bad id!"})
     assert invalid_order.status_code == 422
+
+    missing_payment = api.post(
+        url, headers=headers, json={k: v for k, v in valid.items() if k != "cashfree_payment_id"}
+    )
+    assert missing_payment.status_code == 422
+    assert "cashfree_payment_id" in missing_payment.json()["detail"]
+
+    bad_reason = api.post(url, headers=headers, json={**valid, "grant_reason": "because"})
+    assert bad_reason.status_code == 422
+
+    operator_without_note = api.post(
+        url, headers=headers, json={**valid, "grant_reason": "operator_comp"}
+    )
+    assert operator_without_note.status_code == 422
 
     missing_client = api.post(
         f"/v1/admin/clients/cli_missing_{uuid.uuid4().hex[:8]}/grant-access",
@@ -1024,7 +1076,11 @@ def test_immutable_tables_reject_direct_update_and_delete(api):
     grant = api.post(
         f"/v1/admin/clients/{client['client_id']}/grant-access",
         headers={"X-AgentGrid-Admin-Key": "test-admin-key", "X-AgentGrid-Admin-MFA": _totp()},
-        json={"tier": "plus", "cashfree_order_id": "order_immutable_" + uuid.uuid4().hex},
+        json={
+            "tier": "plus",
+            "cashfree_order_id": "order_immutable_" + uuid.uuid4().hex,
+            "cashfree_payment_id": "pay_immutable_" + uuid.uuid4().hex,
+        },
     )
     assert grant.status_code == 200
 

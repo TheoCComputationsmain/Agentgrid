@@ -1104,6 +1104,11 @@ class GrantAccessRequest(BaseModel):
     tier: str = Field(..., pattern=r"^(plus|pro|enterprise)$")
     cashfree_order_id: str = Field(..., min_length=3, max_length=128)
     cashfree_payment_id: Optional[str] = Field(None, max_length=128)
+    grant_reason: str = Field(
+        "external_payment",
+        pattern=r"^(external_payment|operator_comp|operator_test|operator_support)$",
+    )
+    reason_note: Optional[str] = Field(None, max_length=200)
 
 
 class RecordStatementPaymentRequest(BaseModel):
@@ -3719,6 +3724,18 @@ async def grant_access(
         raise HTTPException(status_code=422, detail="cashfree_order_id contains invalid characters.")
     if payload.cashfree_payment_id and not ORDER_ID_PATTERN.fullmatch(payload.cashfree_payment_id):
         raise HTTPException(status_code=422, detail="cashfree_payment_id contains invalid characters.")
+    if payload.grant_reason == "external_payment" and not payload.cashfree_payment_id:
+        raise HTTPException(
+            status_code=422,
+            detail="cashfree_payment_id is required for an external payment grant.",
+        )
+    if payload.grant_reason != "external_payment" and (
+        not payload.reason_note or len(payload.reason_note.strip()) < 3
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="reason_note is required for operator grants.",
+        )
     client = await db.get(ClientModel, client_id)
     if not client:
         raise HTTPException(status_code=404, detail="Client not found.")
@@ -3749,7 +3766,10 @@ async def grant_access(
             cashfree_payment_id=payload.cashfree_payment_id,
             tier=payload.tier,
             details=(
-                f"External Cashfree plan order recorded by operator; tier={payload.tier}; "
+                f"Plan access granted; source={payload.grant_reason}; tier={payload.tier}; "
+                f"order={payload.cashfree_order_id}; "
+                f"payment={payload.cashfree_payment_id or 'none'}; "
+                f"note={payload.reason_note or 'none'}; "
                 f"base and overage billed at cycle end {client.cycle_end}"
             ),
             created_at=_now_iso(),
@@ -3761,7 +3781,11 @@ async def grant_access(
         action="access.granted_external",
         target_type="client",
         target_id=client_id,
-        metadata={"tier": payload.tier, "cashfree_order_id": payload.cashfree_order_id},
+        metadata={
+            "tier": payload.tier,
+            "cashfree_order_id": payload.cashfree_order_id,
+            "grant_source": payload.grant_reason,
+        },
     )
     try:
         await db.commit()
@@ -3772,6 +3796,7 @@ async def grant_access(
         "duplicate": False,
         "client_id": client_id,
         "tier": payload.tier,
+        "grant_source": payload.grant_reason,
         "access_expires_at": client.access_expires_at,
         "limits": TIER_LIMITS[payload.tier],
     }
