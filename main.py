@@ -2488,6 +2488,7 @@ def _quickstart_done_html(result: dict[str, Any]) -> str:
     card_url = html.escape(str(result["card_url"]), quote=True)
     receipts_url = html.escape(str(result["receipts_url"]), quote=True)
     api_key = html.escape(str(result.get("api_key", "")), quote=True)
+    quickstart_url = html.escape(PUBLIC_BASE_URL + "/quickstart", quote=True)
     key_html = (
         f"<details><summary>API key for CLI/SDK use (optional)</summary><p><code>{api_key}</code></p>"
         "<p class='muted'>Store it privately. It is shown only once.</p></details>"
@@ -2510,6 +2511,12 @@ def _quickstart_done_html(result: dict[str, Any]) -> str:
 <p><a href="{card_url}">Open the signed Agent Card</a> &middot;
 <a href="{receipts_url}">Read the immutable receipt JSON</a></p>
 </div>
+<div class="card">
+<p><strong>Shareable receipt link:</strong> <a href="{receipts_url}">{receipts_url}</a></p>
+<p class="muted">Anyone with this link can verify the signature and scope without an API key.</p>
+</div>
+<p><strong>Know another builder?</strong> Send them <code>{quickstart_url}</code> — they can get their
+own signed receipt in under a minute, with no code.</p>
 <div class="note">This no-code demo generates demo keys on the server and discards them immediately.
 For real deployments, use <code>agrid</code> or the Python SDK so private keys never leave your machine.</div>
 {key_html}
@@ -3013,7 +3020,10 @@ async def agent_card_page(agent_id: str, db: AsyncSession = Depends(get_db)) -> 
 <p><strong>Issued:</strong> {html.escape(card['issued_at'])}</p>
 <p>Signature: <code>{html.escape(card['signature'])}</code></p>
 <p><a href="/v1/agents/{html.escape(agent_id)}/verify">Verify</a> &middot;
-<a href="/v1/agents/{html.escape(agent_id)}.json">JSON</a></p></body></html>"""
+<a href="/v1/agents/{html.escape(agent_id)}.json">JSON</a></p>
+<p class="badge"><strong>Share this card:</strong> <code>{html.escape(card_url, quote=True)}</code></p>
+<p>Want your own signed card and handoff? <a href="/quickstart">Run the no-code quickstart</a> —
+no code, CLI, or API key needed.</p></body></html>"""
 
 
 # ---------------------------------------------------------------------------

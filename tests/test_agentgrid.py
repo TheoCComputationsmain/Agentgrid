@@ -235,6 +235,8 @@ def test_no_code_quickstart_creates_real_handoff(api, monkeypatch):
     assert finished.status_code == 200, finished.text
     assert "Your handoff is recorded" in finished.text
     assert "API key for CLI/SDK use" in finished.text
+    assert "Shareable receipt link" in finished.text
+    assert "Know another builder?" in finished.text
     assert re.search(r"h_[0-9a-f]{32}", finished.text)
 
     agents = _sqlite_rows("SELECT agent_id FROM agents WHERE client_id = ?", (client_id,))
@@ -330,6 +332,8 @@ def test_agent_card_signature_and_verification(api):
     page = api.get(f"/a/{card['agent_id']}")
     assert page.status_code == 200
     assert "AgentGrid verified card" in page.text
+    assert "Share this card" in page.text
+    assert 'href="/quickstart"' in page.text
 
 
 def test_agent_overage_hard_cap_and_upgrade(api, monkeypatch):
