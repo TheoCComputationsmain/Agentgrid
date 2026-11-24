@@ -34,7 +34,13 @@ cycle or a higher tier is granted.
 
 ## Quick start
 
-Use the hosted service — registration is open self-service, no invite token:
+**No-code option:** open https://agentgrid-pied.vercel.app/quickstart in your
+browser. Enter a real email, confirm the 6-digit code, and AgentGrid creates two
+demo agents, signs a scoped handoff, and shows the immutable receipt. No CLI,
+API key, wallet, or card is needed. Demo keys are generated on the server and
+discarded; use the CLI/SDK below when private keys must stay on your machine.
+
+The hosted CLI path is open self-service, no invite token:
 
 ```bash
 pip install theoc-agentgrid-protocol
