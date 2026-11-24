@@ -4,17 +4,73 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/theoc-agentgrid-protocol.svg)](https://pypi.org/project/theoc-agentgrid-protocol/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/TheoCComputationsmain/Agentgrid/blob/main/LICENSE)
 
-Signed identity, discovery, and handoff receipts for AI agents.
+Signed agent cards, scoped handoffs, and offline-verifiable receipts for AI agents.
 
-AgentGrid is infrastructure for agents, not another chatbot. Developers register
-agents, publish signed capability cards, and record signed handoffs between
-agents. Anyone can verify a card with AgentGrid's published Ed25519 public key.
+AgentGrid is a hosted API plus a small Python SDK for recording who handed a task
+to whom, under what scope, and proving the signed bytes later. Developers register
+agents with locally generated Ed25519 keys, publish signed capability cards, and
+record signed handoffs. Anyone can verify a card with AgentGrid's published public
+key, and anyone with an agent ID can read its receipts.
 
 There is **no money inside the platform**: no wallet, no escrow, no auto top-up,
 no in-app checkout, and no automatic deduction. Usage is metered in an immutable
 ledger; the base subscription and overage are paid externally at cycle end.
 
 **Write-up:** [I built a signed handoff layer for AI agents (and you can verify it offline)](https://dev.to/theoc_computations_21b3c7/i-built-a-signed-handoff-layer-for-ai-agents-and-you-can-verify-it-offline-5alh)
+
+Keywords: `ai-agents` · `agent-handoff` · `ed25519` · `signed-receipts` ·
+`scope-chain` · `langgraph` · `crewai`
+
+## Three-step start
+
+```bash
+pip install theoc-agentgrid-protocol
+agrid register --email you@example.com
+agrid verify 123456          # 6-digit code from your inbox; first handoff runs automatically
+```
+
+Registration is open self-service. No invite token is required, and no API key
+exists until the emailed code is confirmed. `agrid register` prints only a Client
+ID and tier; the key is saved to `~/.agentgrid/credentials.json` after
+verification and is never printed. For a zero-install option, open
+https://agentgrid-pied.vercel.app/quickstart in a browser: it creates two demo
+agents and a real receipt, then discards the server-generated keys.
+
+The Python SDK mirrors those three steps:
+
+```python
+from agentgrid_protocol import AgentGrid
+
+ag = AgentGrid()  # reads AGENTGRID_API_KEY or ~/.agentgrid/credentials.json
+planner = ag.create_agent("Planner", capabilities=["plan"])
+worker = ag.create_agent("Worker", capabilities=["read"])
+
+receipt = planner.handoff_to(
+    worker,
+    task="summarize the quarterly report",
+    scope={"allowed": ["read"], "max_actions": 2},
+)
+print(receipt["handoff_id"])
+print(ag.receipts(worker.agent_id)["count"])
+```
+
+Only a SHA-256 `task_hash` is sent; the raw task text is not stored.
+
+```mermaid
+flowchart LR
+    A[Local Ed25519 key] -->|public key only| G[AgentGrid API]
+    A -->|sign canonical handoff| H[Handoff payload]
+    H --> G
+    G --> C[Signed agent card]
+    G --> R[Immutable receipt]
+    C --> V[Offline verifier using published key]
+    R --> Q[Public receipt reader by agent ID]
+```
+
+What is signed: every card field except `signature`, `verify_url`, and `overage`;
+and the handoff fields `v`, `handoff_id`, `from_agent_id`, `to_agent_id`,
+`task_hash`, `scope`, `created_at`, and `parent_handoff_id`. A child handoff may
+only narrow its parent's scope.
 
 ## Tiers
 
@@ -34,23 +90,9 @@ All tiers, including Free, allow overage until the hard cap of **3× included
 limits**. Beyond that, new agents and handoffs return HTTP 402 until the next
 cycle or a higher tier is granted.
 
-## Quick start
+## Local development and SDK details
 
-**No-code option:** open https://agentgrid-pied.vercel.app/quickstart in your
-browser. Enter a real email, confirm the 6-digit code, and AgentGrid creates two
-demo agents, signs a scoped handoff, and shows the immutable receipt. No CLI,
-API key, wallet, or card is needed. Demo keys are generated on the server and
-discarded; use the CLI/SDK below when private keys must stay on your machine.
-
-The hosted CLI path is open self-service, no invite token:
-
-```bash
-pip install theoc-agentgrid-protocol
-agrid register --email you@example.com
-agrid verify 123456          # code from your inbox; first handoff runs automatically
-```
-
-Or run it locally:
+Run the service locally with:
 
 ```bash
 pip install -r requirements-dev.txt
@@ -59,44 +101,32 @@ pytest
 uvicorn main:app --reload
 ```
 
-Register a client (works in production too):
+Direct HTTP registration follows the same two-step key flow:
 
 ```bash
 curl -X POST http://localhost:8000/v1/clients/register \
   -H 'Content-Type: application/json' \
   -d '{"email":"you@example.com"}'
+
+curl -X POST http://localhost:8000/v1/clients/verify-email \
+  -H 'Content-Type: application/json' \
+  -d '{"client_id":"cli_...","code":"123456"}'
 ```
 
-The registration response contains no key. Confirm the emailed 6-digit code with
-`POST /v1/clients/verify-email` (or `agrid verify <code>`); the API key is returned
-only then. The CLI immediately runs a real signed handoff after verification, so
-you see a receipt without a fourth command. Use `agrid verify <code> --no-quickstart`
-to skip it, or `agrid quickstart` any time to run another demo. Use the key as
-`X-AgentGrid-API-Key` for all authenticated calls.
+The first response has no key; the second returns it after the emailed code is
+confirmed. Use it as `X-AgentGrid-API-Key` for authenticated calls.
 
-## Python SDK
+Signed up before email verification? Normal CLI commands print the upgrade
+command automatically. Run `agrid update --email you@example.com`, then
+`agrid verify <code>`; the old key stops working while the code is pending and
+is replaced at verification. If you lost it, register a new free client.
 
-For a one-command integration, use the published SDK:
-
-```bash
-pip install theoc-agentgrid-protocol
-agrid register --email you@example.com
-agrid verify 123456          # code from your inbox; first handoff runs automatically
-```
-
-Signed up before email verification? If your client has a key but no email on
-file, `agrid doctor` (and normal commands such as `agrid quickstart`,
-`agrid statement`, or `agrid receipts`) prints the upgrade command automatically.
-You can also go straight to `agrid update --email you@example.com`, then
-`agrid verify <code>`. Your current key stops working while the code is pending
-and is replaced at verification; if you lost the old key, register a new free client.
-
-`agrid quickstart` registers two agents, verifies a signed card online and
-offline, records a signed handoff, and reads the immutable receipt. Import it as
-`agentgrid_protocol`. For a real framework drop-in, copy
-`examples/langgraph_handoff.py` into your LangGraph, CrewAI, or OpenAI Agents SDK
-project and adapt the single `handoff_node`. Full source and API details are in
-`sdk/README.md`; the hosted guide is at `https://agentgrid-pied.vercel.app/guide`.
+`agrid quickstart` registers two agents, verifies a card online and offline,
+records a signed handoff, and reads the immutable receipt. For a framework
+drop-in, copy `examples/langgraph_handoff.py` into your LangGraph, CrewAI, or
+OpenAI Agents SDK project and adapt the single `handoff_node`. Full SDK details
+are in `sdk/README.md`; the hosted guide is at
+`https://agentgrid-pied.vercel.app/guide`.
 
 ## Search discovery
 

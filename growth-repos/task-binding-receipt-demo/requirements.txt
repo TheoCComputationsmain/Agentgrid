@@ -1,0 +1,2 @@
+cryptography>=42,<51
+theoc-agentgrid-protocol>=0.2.6

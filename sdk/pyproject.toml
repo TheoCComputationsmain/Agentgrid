@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "theoc-agentgrid-protocol"
-version = "0.2.6"
-description = "Signed agent identity, handoffs, and receipts for AgentGrid"
+version = "0.2.7"
+description = "Signed agent identity, scoped handoffs, and receipts for AgentGrid"
 readme = "README.md"
 requires-python = ">=3.10"
-keywords = ["agents", "identity", "ed25519", "handoff", "receipts", "audit", "ai", "multi-agent"]
+keywords = ["ai-agents", "agent-handoff", "langgraph", "crewai", "llm-security", "ed25519", "signed-receipts", "scope-chain"]
 dependencies = [
     "cryptography>=42,<51",
 ]
